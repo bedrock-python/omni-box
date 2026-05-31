@@ -28,7 +28,7 @@ pip install omni-box
 | `settings` | `pydantic-settings` helpers in `omni_box.contrib.settings`. |
 | `dishka` | DI providers in `omni_box.contrib.dishka`. |
 
-There is no monorepo dependency on `kafka-publisher-kit` or `kafka-consumer-kit` — the bundled Kafka adapter talks to `aiokafka` directly.
+The Kafka adapter talks to `aiokafka` directly — no third-party publisher/consumer wrapper is required.
 
 ## Key features
 
