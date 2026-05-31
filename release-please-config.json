@@ -4,7 +4,13 @@
     ".": {
       "release-type": "python",
       "package-name": "omni-box",
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "omni_box/__version__.py"
+        }
+      ]
     }
   }
 }
