@@ -1,0 +1,76 @@
+[project]
+site_name = "omni-box"
+site_description = "Unified transactional messaging (Outbox & Inbox) library for async Python applications"
+site_author = "Alex Shalaev"
+repo_name = "bedrock-python/omni-box"
+repo_url = "https://github.com/bedrock-python/omni-box"
+edit_uri = "edit/master/docs/"
+copyright = "Copyright &copy; 2026 Alex Shalaev"
+docs_dir = "docs"
+site_dir = "site"
+
+nav = [
+    { "Home" = "index.md" },
+    { "Guide" = [
+        { "Quick start" = "guide/quickstart.md" },
+        { "User guide" = "user_guide.md" },
+        { "Configuration" = "guide/configuration.md" },
+        { "Advanced" = "guide/advanced.md" },
+        { "Architecture" = "architecture.md" },
+        { "Storage adapters" = "storage_adapters.md" },
+        { "Migrations" = "migrations.md" },
+        { "Troubleshooting" = "troubleshooting.md" },
+    ] },
+    { "Reference" = [
+        { "API Reference" = "api_reference.md" },
+        { "Generated API" = "reference/index.md" },
+    ] },
+    { "Changelog" = "changelog.md" },
+]
+
+[project.theme]
+features = [
+    "content.code.annotate",
+    "content.code.copy",
+    "content.code.select",
+    "content.tabs.link",
+    "content.tooltips",
+    "navigation.footer",
+    "navigation.indexes",
+    "navigation.instant",
+    "navigation.instant.prefetch",
+    "navigation.path",
+    "navigation.sections",
+    "navigation.tabs",
+    "navigation.tabs.sticky",
+    "navigation.top",
+    "navigation.tracking",
+    "search.highlight",
+    "search.share",
+    "search.suggest",
+    "toc.follow",
+    "toc.integrate",
+]
+
+[[project.theme.palette]]
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[project.plugins.mkdocstrings.handlers.python]
+inventories = ["https://docs.python.org/3/objects.inv"]
+paths = ["."]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+inherited_members = true
+show_source = true
+show_root_full_path = false
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+heading_level = 3
