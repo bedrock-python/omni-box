@@ -1,4 +1,4 @@
-"""Omni-box implementation (Outbox & Inbox) for AIOps platform."""
+"""Unified Transactional Outbox & Inbox primitives for async Python services."""
 
 from .__version__ import __version__
 from .application.factories import (
