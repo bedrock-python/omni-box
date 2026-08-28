@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.0...omni-box-v0.1.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **postgres:** serialize idempotent inserts when the unique index cannot enforce the key ([#8](https://github.com/bedrock-python/omni-box/issues/8)) ([525e3a4](https://github.com/bedrock-python/omni-box/commit/525e3a419144b7c91bac81a92a0d8c1a8c7a1647)), closes [#7](https://github.com/bedrock-python/omni-box/issues/7)
+
 ## 0.1.0 (2026-05-31)
 
 
