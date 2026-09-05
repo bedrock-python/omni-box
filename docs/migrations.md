@@ -168,6 +168,16 @@ CREATE UNIQUE INDEX idx_inbox_events_p_deduplication
 
 `PostgresInboxRepository` reads the column tuple from `__inbox_dedup_index_columns__` on the model class, so the partitioned base sets `("message_id", "consumer_group", "created_at")` automatically.
 
+For the partitioned outbox:
+
+```sql
+CREATE UNIQUE INDEX idx_outbox_events_p_idempotency_key
+    ON outbox_events_partitioned (idempotency_key, created_at)
+    WHERE idempotency_key IS NOT NULL;
+```
+
+`PostgresOutboxRepository` reads the conflict target from `__outbox_conflict_index_idempotency__` (`("idempotency_key", "created_at")` on the partitioned base). Because that target cannot reject a retry on its own, the repository also serializes inserts by `idempotency_key` with an advisory lock — see [Troubleshooting](troubleshooting.md#outbox).
+
 ## SQLAlchemy registration
 
 `omni_box.infra.storage.postgres.orm` does **not** export a shared `Base`. Define your own `DeclarativeBase` and bind the abstract models to it:
