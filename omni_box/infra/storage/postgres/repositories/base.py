@@ -9,8 +9,8 @@ from uuid import UUID
 
 import sqlalchemy as sa
 import structlog
-from sqlalchemy import case, delete, func, or_, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import bindparam, case, delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +42,12 @@ from ..constants import MAX_BATCH_SIZE, REPO_BATCH_SIZE
 from ..orm import EventMixin
 
 logger = structlog.get_logger(__name__)
+
+# The partition key. A unique index on a partitioned table must carry it, so a
+# conflict target that includes it only catches an identical timestamp — never a
+# retry — and the logical identity has to be serialized in the repository instead.
+_PARTITION_KEY_COLUMN = "created_at"
+_IDENTITY_TOKEN_SEPARATOR = "\x1f"
 
 
 def _as_list(value: list[str] | tuple[str, ...] | None) -> list[str] | None:
@@ -110,6 +116,12 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
     async def create(self, event: T) -> T:
         try:
             values = self._prepare_insert_values(event)
+            if event.idempotency_key and self._idempotency_index_is_partition_scoped:
+                existing_db_event = await self._lock_identity_and_find_existing(values)
+                if existing_db_event is not None:
+                    self._log_event_skipped(existing_db_event, event.idempotency_key)
+                    return self._to_entity(existing_db_event)
+
             stmt = self._build_insert_stmt(event, values)
             db_event = await self._execute_insert(stmt, event.id)
 
@@ -172,9 +184,18 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
                         if existing:
                             created_entities.append(self._to_entity(existing))
 
+        dropped_in_batch: list[T] = []
         try:
+            if with_idem and self._idempotency_index_is_partition_scoped:
+                with_idem, dropped_in_batch = await self._settle_partition_scoped_duplicates(
+                    with_idem, created_entities
+                )
             await _process_group(with_idem, self._conflict_index_idempotency)
             await _process_group(without_idem, self._conflict_index_id)
+            for duplicate in dropped_in_batch:
+                existing = await self._fetch_existing_event(duplicate)
+                if existing:
+                    created_entities.append(self._to_entity(existing))
         except IntegrityError as e:
             raise StorageIntegrityError(f"Postgres: bulk creation constraint violation: {e}") from e
         except SQLAlchemyError as e:
@@ -683,9 +704,116 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def _fetch_existing_event(self, event: T) -> M | None:
-        col = self._model_class.idempotency_key if event.idempotency_key else self._model_class.id
-        val = event.idempotency_key if event.idempotency_key else event.id
-        return (await self._session.execute(select(self._model_class).where(col == val))).scalar_one_or_none()
+        if not event.idempotency_key:
+            stmt = select(self._model_class).where(self._model_class.id == event.id)
+            return (await self._session.execute(stmt)).scalar_one_or_none()
+        # Earliest row wins: on a partitioned table the index cannot rule out an
+        # older duplicate, and a table that already holds one must not raise here.
+        return await self._find_existing_by_identity(self._prepare_insert_values(event))
+
+    @property
+    def _idempotency_index_is_partition_scoped(self) -> bool:
+        """Whether the idempotency conflict target carries the partition key.
+
+        Then the unique index cannot enforce the key on its own (two rows with the
+        same key conflict only when ``created_at`` is identical), so the identity
+        is serialized with a transaction-scoped advisory lock and a lookup before
+        the insert — the same treatment the inbox gives its business key. A
+        non-partitioned table keeps the single-statement insert.
+        """
+        return _PARTITION_KEY_COLUMN in self._conflict_index_idempotency
+
+    @property
+    def _idempotency_identity_columns(self) -> list[str]:
+        """The columns that identify an idempotent event: the conflict target minus the partition key."""
+        return [column for column in self._conflict_index_idempotency if column != _PARTITION_KEY_COLUMN]
+
+    def _identity_token(self, values: dict[str, Any]) -> str:
+        return _IDENTITY_TOKEN_SEPARATOR.join(str(values[column]) for column in self._idempotency_identity_columns)
+
+    def _identity_lock_namespace(self) -> str:
+        return str(getattr(self._model_class, "__tablename__", self._model_class.__name__))
+
+    async def _acquire_identity_locks(self, tokens: list[str]) -> None:
+        """Take transaction-scoped advisory locks for ``tokens``, in sorted order so writers never deadlock."""
+        stmt = text(
+            "SELECT pg_advisory_xact_lock(hashtext(CAST(:namespace AS text)), hashtext(token)) "
+            "FROM unnest(CAST(:tokens AS text[])) AS token"
+        ).bindparams(bindparam("tokens", type_=ARRAY(sa.String())))
+        await self._session.execute(stmt, {"namespace": self._identity_lock_namespace(), "tokens": sorted(tokens)})
+
+    async def _find_existing_by_identity(self, values: dict[str, Any]) -> M | None:
+        stmt = (
+            select(self._model_class)
+            .where(
+                *(getattr(self._model_class, column) == values[column] for column in self._idempotency_identity_columns)
+            )
+            .order_by(self._model_class.created_at.asc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def _lock_identity_and_find_existing(self, values: dict[str, Any]) -> M | None:
+        """Serialize writers of one identity and return the row the first of them wrote, if any.
+
+        A concurrent writer of the same identity queues on the lock until this
+        transaction ends, then finds the row here instead of inserting a second
+        one under a different ``created_at``.
+        """
+        await self._acquire_identity_locks([self._identity_token(values)])
+        return await self._find_existing_by_identity(values)
+
+    async def _settle_partition_scoped_duplicates(
+        self, events: list[T], created_entities: list[T]
+    ) -> tuple[list[T], list[T]]:
+        """Split ``events`` into the ones still to insert and the in-batch duplicates.
+
+        Identities already in the table are appended to ``created_entities`` as
+        skipped, exactly like a conflict on a non-partitioned table. In-batch
+        duplicates collapse to their first occurrence and are resolved after the
+        insert through :meth:`_fetch_existing_event`, like any other skipped row.
+        """
+        first_values_by_token: dict[str, tuple[T, dict[str, Any]]] = {}
+        dropped: list[T] = []
+        for event in events:
+            values = self._prepare_insert_values(event)
+            token = self._identity_token(values)
+            if token in first_values_by_token:
+                dropped.append(event)
+            else:
+                first_values_by_token[token] = (event, values)
+
+        await self._acquire_identity_locks(list(first_values_by_token))
+
+        identity_columns = [getattr(self._model_class, column) for column in self._idempotency_identity_columns]
+        identities = [
+            tuple(values[column] for column in self._idempotency_identity_columns)
+            for _event, values in first_values_by_token.values()
+        ]
+        stmt = (
+            select(self._model_class)
+            .where(sa.tuple_(*identity_columns).in_(identities))
+            .order_by(*identity_columns, self._model_class.created_at.asc())
+        )
+        existing_by_token: dict[str, M] = {}
+        for row in (await self._session.execute(stmt)).scalars().all():
+            # Rows arrive earliest-first per identity, so the first one seen is the first writer.
+            existing_by_token.setdefault(self._identity_token_of_row(row), row)
+
+        to_insert: list[T] = []
+        for token, (event, _values) in first_values_by_token.items():
+            existing = existing_by_token.get(token)
+            if existing is not None:
+                self._log_event_skipped(existing, event.idempotency_key)
+                created_entities.append(self._to_entity(existing))
+            else:
+                to_insert.append(event)
+        return to_insert, dropped
+
+    def _identity_token_of_row(self, row: M) -> str:
+        return _IDENTITY_TOKEN_SEPARATOR.join(
+            str(getattr(row, column)) for column in self._idempotency_identity_columns
+        )
 
     async def _get_existing_ids(self, event_ids: list[UUID]) -> list[UUID]:
         return list(
