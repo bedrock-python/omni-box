@@ -31,6 +31,8 @@ Pick `stale_timeout_seconds` so it is comfortably larger than your handler timeo
 
 Outbox rows are deduplicated by `idempotency_key` when it is set (the partial unique index `idx_outbox_events_idempotency_key`); otherwise by primary key. Use a stable `idempotency_key` per business action when you need at-most-once semantics on the producing side.
 
+On the partitioned variant the unique index has to include the partition key — `(idempotency_key, created_at)` — which cannot reject a retry on its own. `PostgresOutboxRepository` therefore serializes idempotent inserts there the way the inbox does for its business key: a transaction-scoped advisory lock on the key, a lookup (earliest row wins), and only then the insert. The guarantee is the same as on a plain table, including under concurrent writers; the cost is one lock and one `SELECT` per insert that carries an `idempotency_key`. A table that already holds duplicates from before this behaviour keeps working: `create()` returns the earliest row instead of raising `MultipleResultsFound`.
+
 ### Inbox
 
 Inbox rows are deduplicated by **`(message_id, consumer_group)`** (the unique index `idx_inbox_deduplication`). On the partitioned variant the tuple is extended with `created_at` because PostgreSQL requires the partition key in unique indexes — `PostgresInboxRepository` reads the actual columns from `__inbox_dedup_index_columns__`.

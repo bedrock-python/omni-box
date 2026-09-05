@@ -30,6 +30,8 @@ Use `OutboxEventPartitionedDBBase` / `InboxEventPartitionedDBBase`. PostgreSQL r
 
 Create child partitions per time window (typically RANGE by month or day) and attach them with `pg_partman` or your own DDL. The repositories use `INSERT ... ON CONFLICT DO NOTHING` on the partitioned table, which propagates to the correct child partition.
 
+Deduplication on a partitioned table cannot rely on that index alone, because it has to carry `created_at` and two retries never share a timestamp. Both repositories serialize the logical identity instead — the inbox for `(message_id, consumer_group)`, the outbox for `idempotency_key` — with a transaction-scoped advisory lock (`pg_advisory_xact_lock`) and a lookup before the insert, so a retry, a replay or a concurrent writer gets the existing row back. `bulk_create` does the same per batch (one lock statement, one lookup). Non-partitioned tables keep the single `INSERT ... ON CONFLICT DO NOTHING` round trip.
+
 ## Multi-region / multi-worker
 
 - Use `DistributedLockingFetchStrategy` (auto-picked when the repository implements `SupportsDistributedLocking`).
