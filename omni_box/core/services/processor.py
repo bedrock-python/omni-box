@@ -48,8 +48,17 @@ class EventBatchProcessor[T: BaseEvent]:
         shutdown_requested_func: Callable[[], bool] | None = None,
         **fetch_filters: Unpack[FetchFilters],
     ) -> BatchProcessingResult:
-        """Fetch and process a batch of events using the configured pipeline."""
+        """Fetch and process a batch of events using the configured pipeline.
+
+        ``shutdown_requested_func`` is consulted before the fetch and again
+        before every event: once it returns ``True`` no further event is
+        processed, the events already handled are committed, and the untouched
+        ones come back in ``BatchProcessingResult.remaining_event_ids``.
+        """
         try:
+            if shutdown_requested_func is not None and shutdown_requested_func():
+                return BatchProcessingResult()
+
             # 1. Fetch
             events = await self._fetch_strategy.fetch(
                 self._repo,
@@ -66,6 +75,7 @@ class EventBatchProcessor[T: BaseEvent]:
                 repo=self._repo,
                 worker_id=worker_id,
                 metrics=self._metrics,
+                shutdown_requested=shutdown_requested_func,
             )
 
             await self._pipeline.process_batch(events, context)

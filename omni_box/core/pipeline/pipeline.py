@@ -78,7 +78,10 @@ class ProcessingPipeline[T: BaseEvent]:
         """Process a batch of events through the pipeline.
 
         Triggers ``on_batch_start`` and ``on_batch_end`` hooks. Processes
-        events sequentially until all are done or a step signals to stop.
+        events sequentially until all are done, a step signals to stop, or
+        ``context.shutdown_requested`` returns ``True``. Events left untouched
+        by an early stop are recorded as skipped so the caller can see them in
+        ``BatchProcessingResult.remaining_event_ids``.
 
         Args:
             events: List of domain events to process in this batch.
@@ -91,9 +94,19 @@ class ProcessingPipeline[T: BaseEvent]:
 
         # 2. Sequential Event Processing
         try:
-            for event in events:
+            for index, event in enumerate(events):
                 if event.id in context.skipped_ids:
                     continue
+
+                if context.shutdown_requested is not None and context.shutdown_requested():
+                    remaining = [e.id for e in events[index:] if e.id not in context.skipped_ids]
+                    context.skipped_ids.update(remaining)
+                    logger.info(
+                        "Batch processing stopped: shutdown requested",
+                        worker_id=context.worker_id,
+                        remaining_events=len(remaining),
+                    )
+                    break
 
                 await self.process_event(event, context)
         except PipelineStoppedError:

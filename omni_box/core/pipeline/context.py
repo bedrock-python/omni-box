@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
@@ -24,6 +25,8 @@ class ProcessingContext[T: BaseEvent]:
     """Unique identifier of the worker instance currently processing events."""
     metrics: ProcessingMetrics | None = None
     """Optional metrics collector for recording processing stats."""
+    shutdown_requested: Callable[[], bool] | None = None
+    """Optional predicate consulted before each event; truthy stops the batch."""
 
     # Results of processing
     completed_ids: list[UUID] = field(default_factory=list)
