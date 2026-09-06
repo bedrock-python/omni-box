@@ -269,3 +269,63 @@ async def test__processor__shutdown_never_requested__processes_whole_batch() -> 
     # Assert
     assert [e.id for e in step.seen] == [e.id for e in events]
     assert result.remaining_event_ids == set()
+
+
+class _OutboxMetricsFake:
+    def __init__(self) -> None:
+        self.locked_batch_sizes: list[int] = []
+
+    def set_locked_batch_size(self, value: int) -> None:
+        self.locked_batch_sizes.append(value)
+
+    def inc_published(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def inc_processed(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def inc_failed(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def inc_duplicate(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def observe_handler_duration(self, seconds: float, event_type: str | None = None) -> None:
+        pass
+
+
+async def test__processor__outbox_metrics__records_locked_batch_size() -> None:
+    # Arrange
+    events = [create_fake_event() for _ in range(2)]
+    metrics = _OutboxMetricsFake()
+    processor: EventBatchProcessor[OutboxEvent] = EventBatchProcessor(
+        _Repo(),
+        _PipelineSpy(),
+        _FetchFake(events=events),
+        _CommitFake(),  # type: ignore[arg-type]
+        metrics=metrics,
+    )
+
+    # Act
+    await processor.process_batch(worker_id="w-1", batch_size=10)
+
+    # Assert
+    assert metrics.locked_batch_sizes == [2]
+
+
+async def test__processor__outbox_metrics_empty_batch__resets_locked_batch_size() -> None:
+    # Arrange
+    metrics = _OutboxMetricsFake()
+    processor: EventBatchProcessor[OutboxEvent] = EventBatchProcessor(
+        _Repo(),
+        _PipelineSpy(),
+        _FetchFake(events=[]),
+        _CommitFake(),  # type: ignore[arg-type]
+        metrics=metrics,
+    )
+
+    # Act
+    await processor.process_batch(worker_id="w-1", batch_size=10)
+
+    # Assert
+    assert metrics.locked_batch_sizes == [0]

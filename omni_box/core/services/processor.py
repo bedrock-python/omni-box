@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Unpack
 import structlog
 
 from ..pipeline.context import ProcessingContext
+from ..protocols.metrics import OutboxMetrics
 from .results import BatchProcessingResult
 
 if TYPE_CHECKING:
@@ -66,6 +67,9 @@ class EventBatchProcessor[T: BaseEvent]:
                 worker_id=worker_id,
                 **fetch_filters,
             )
+
+            if isinstance(self._metrics, OutboxMetrics):
+                self._metrics.set_locked_batch_size(len(events))
 
             if not events:
                 return BatchProcessingResult()
