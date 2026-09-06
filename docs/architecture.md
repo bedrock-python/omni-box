@@ -96,7 +96,7 @@ The `exactly_once_commit_on_failed` flag (default `False`) lets you commit even 
 
 `omni-box` does **not** provide a Unit-of-Work or session implementation. Two integration points are exposed instead:
 
-- For batch processors (outbox/inbox): pass a repository that is already bound to an active session. The processor never starts a transaction; it expects fetch/commit to be transactional inside the repository implementation.
+- For batch processors (outbox/inbox): pass a repository bound to a session, and call `process_batch` / `publish_batch` inside a transaction you open and commit. Neither the processor nor the repository starts or commits one, and the fetch, the lock, the handler and the status write-back are a single unit of work — leave the transaction out and the whole cycle is rolled back, with the rows still `pending`.
 - For `InboxConsumerRunner`: pass an `InboxTransactionProviderProtocol`. The runner calls `provider.transaction()` once per consumed message — the context manager must open a transaction and yield an `InboxEventRepository`.
 
 This keeps the library decoupled from your `AsyncSession`, your UoW, and your DI framework.
