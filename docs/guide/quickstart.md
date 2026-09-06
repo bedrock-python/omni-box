@@ -53,19 +53,31 @@ async with uow.transaction() as tx:
 
 ## 4. Run the publisher
 
+The publisher runs in a transaction of its own, and — like every other repository call —
+it is the caller who opens and commits it. Fetch, lock, publish and status update are one
+unit of work.
+
 ```python
 from omni_box import OutboxPublisher
 from omni_box.core.converters import EnvelopeEventConverter
 from omni_box.infra.brokers.kafka import KafkaEventPublisher
+from omni_box.infra.storage.postgres import PostgresOutboxRepository
 
 broker = KafkaEventPublisher(producer=producer, converter=EnvelopeEventConverter())
-publisher = OutboxPublisher(repo=outbox_repo, broker=broker)
 
 while not shutdown:
-    result = await publisher.publish_batch(worker_id="publisher-1", batch_size=100)
+    async with session_factory() as session, session.begin():   # the commit is yours
+        repo = PostgresOutboxRepository(session, model_class=OutboxEventDB)
+        result = await OutboxPublisher(repo, broker).publish_batch(
+            worker_id="publisher-1",
+            batch_size=100,
+        )
     if not result.processed_event_ids:
         await asyncio.sleep(1.0)
 ```
+
+Without the transaction the lock and the completion are rolled back with the session: the
+rows stay `pending` and the next cycle republishes them.
 
 ## 5. Consume into the inbox
 

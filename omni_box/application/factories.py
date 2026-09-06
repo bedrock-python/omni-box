@@ -7,6 +7,7 @@ from ..core.constants import (
     DEFAULT_PROCESS_TIMEOUT_SECONDS,
     DEFAULT_PUBLISH_TIMEOUT_SECONDS,
 )
+from ..core.dispatch.processor import create_dispatching_handler
 from ..core.models.entities import InboxEvent, OutboxEvent
 from ..core.pipeline.builder import EventProcessorBuilder
 from ..core.pipeline.steps import (
@@ -158,9 +159,7 @@ def create_dispatching_processor(
     additional_steps_after: list[ProcessingStep[InboxEvent]] | None = None,
 ) -> EventBatchProcessor[InboxEvent]:
     """Preset factory for inbox processing with automated event routing."""
-
-    async def dispatch_handler(event: InboxEvent, repo: InboxEventRepository) -> EventHandlerResult:
-        return await router.dispatch(event, event.source, repo, **(dependencies or {}))
+    dispatch_handler = create_dispatching_handler(router, **(dependencies or {}))
 
     builder = EventProcessorBuilder[InboxEvent](repo)
 

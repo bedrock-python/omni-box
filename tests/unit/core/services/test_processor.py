@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from omni_box.core.models.entities import OutboxEvent
 from omni_box.core.pipeline.context import ProcessingContext
 from omni_box.core.pipeline.pipeline import ProcessingPipeline
+from omni_box.core.pipeline.step import BaseProcessingStep, StepResult
 from omni_box.core.services.processor import EventBatchProcessor
 from omni_box.core.services.results import BatchProcessingResult
 from tests.helpers import create_fake_event
@@ -168,3 +170,162 @@ async def test__processor__fetch_cancelled__propagates_without_logging() -> None
     # Act / Assert
     with pytest.raises(asyncio.CancelledError):
         await processor.process_batch(worker_id="w-1", batch_size=5)
+
+
+class _CompletingStep(BaseProcessingStep[OutboxEvent]):
+    def __init__(self, on_event: Callable[[], None] | None = None) -> None:
+        self.seen: list[OutboxEvent] = []
+        self._on_event = on_event
+
+    async def execute(
+        self,
+        event: OutboxEvent,
+        context: ProcessingContext[OutboxEvent],
+    ) -> StepResult:
+        self.seen.append(event)
+        context.mark_completed(event.id, status="completed")
+        if self._on_event is not None:
+            self._on_event()
+        return StepResult.next()
+
+
+async def test__processor__shutdown_requested_mid_batch__stops_and_reports_remaining() -> None:
+    # Arrange
+    stopping = {"now": False}
+
+    def request_shutdown() -> None:
+        stopping["now"] = True
+
+    events = [create_fake_event() for _ in range(3)]
+    step = _CompletingStep(on_event=request_shutdown)
+    pipeline = ProcessingPipeline[OutboxEvent]([step])
+    commit = _CommitFake()
+    processor: EventBatchProcessor[OutboxEvent] = EventBatchProcessor(
+        _Repo(),
+        pipeline,
+        _FetchFake(events=events),
+        commit,  # type: ignore[arg-type]
+    )
+
+    def shutdown_requested() -> bool:
+        return stopping["now"]
+
+    # Act
+    result = await processor.process_batch(
+        worker_id="w-1",
+        batch_size=10,
+        shutdown_requested_func=shutdown_requested,
+    )
+
+    # Assert
+    assert [e.id for e in step.seen] == [events[0].id]
+    assert result.processed_event_ids == [events[0].id]
+    assert result.remaining_event_ids == {events[1].id, events[2].id}
+    assert commit.contexts
+
+
+async def test__processor__shutdown_requested_before_fetch__returns_empty_without_fetching() -> None:
+    # Arrange
+    fetch = _FetchFake(events=[create_fake_event()])
+    commit = _CommitFake()
+    processor: EventBatchProcessor[OutboxEvent] = EventBatchProcessor(
+        _Repo(),
+        _PipelineSpy(),
+        fetch,
+        commit,  # type: ignore[arg-type]
+    )
+
+    # Act
+    result = await processor.process_batch(
+        worker_id="w-1",
+        batch_size=10,
+        shutdown_requested_func=lambda: True,
+    )
+
+    # Assert
+    assert result.processed_event_ids == []
+    assert fetch.calls == []
+    assert commit.contexts == []
+
+
+async def test__processor__shutdown_never_requested__processes_whole_batch() -> None:
+    # Arrange
+    events = [create_fake_event() for _ in range(3)]
+    step = _CompletingStep()
+    processor: EventBatchProcessor[OutboxEvent] = EventBatchProcessor(
+        _Repo(),
+        ProcessingPipeline[OutboxEvent]([step]),
+        _FetchFake(events=events),
+        _CommitFake(),  # type: ignore[arg-type]
+    )
+
+    # Act
+    result = await processor.process_batch(
+        worker_id="w-1",
+        batch_size=10,
+        shutdown_requested_func=lambda: False,
+    )
+
+    # Assert
+    assert [e.id for e in step.seen] == [e.id for e in events]
+    assert result.remaining_event_ids == set()
+
+
+class _OutboxMetricsFake:
+    def __init__(self) -> None:
+        self.locked_batch_sizes: list[int] = []
+
+    def set_locked_batch_size(self, value: int) -> None:
+        self.locked_batch_sizes.append(value)
+
+    def inc_published(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def inc_processed(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def inc_failed(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def inc_duplicate(self, count: int = 1, event_type: str | None = None, status: str | None = None) -> None:
+        pass
+
+    def observe_handler_duration(self, seconds: float, event_type: str | None = None) -> None:
+        pass
+
+
+async def test__processor__outbox_metrics__records_locked_batch_size() -> None:
+    # Arrange
+    events = [create_fake_event() for _ in range(2)]
+    metrics = _OutboxMetricsFake()
+    processor: EventBatchProcessor[OutboxEvent] = EventBatchProcessor(
+        _Repo(),
+        _PipelineSpy(),
+        _FetchFake(events=events),
+        _CommitFake(),  # type: ignore[arg-type]
+        metrics=metrics,
+    )
+
+    # Act
+    await processor.process_batch(worker_id="w-1", batch_size=10)
+
+    # Assert
+    assert metrics.locked_batch_sizes == [2]
+
+
+async def test__processor__outbox_metrics_empty_batch__resets_locked_batch_size() -> None:
+    # Arrange
+    metrics = _OutboxMetricsFake()
+    processor: EventBatchProcessor[OutboxEvent] = EventBatchProcessor(
+        _Repo(),
+        _PipelineSpy(),
+        _FetchFake(events=[]),
+        _CommitFake(),  # type: ignore[arg-type]
+        metrics=metrics,
+    )
+
+    # Act
+    await processor.process_batch(worker_id="w-1", batch_size=10)
+
+    # Assert
+    assert metrics.locked_batch_sizes == [0]

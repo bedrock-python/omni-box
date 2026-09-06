@@ -54,24 +54,36 @@ async def create_user(uow, email: str):
 
 ### 3. Run the publisher
 
+One cycle of `publish_batch` fetches and locks pending rows, publishes each of them, and
+writes the outcome back. All three happen through the session you handed the repository, and
+the library never commits: open a transaction per cycle and commit it yourself.
+
 ```python
 import asyncio
 
 from omni_box import OutboxPublisher
 from omni_box.core.converters import EnvelopeEventConverter
 from omni_box.infra.brokers.kafka import KafkaEventPublisher
+from omni_box.infra.storage.postgres import PostgresOutboxRepository
 
 broker = KafkaEventPublisher(
     producer=kafka_producer,            # caller-owned AIOKafkaProducer
     converter=EnvelopeEventConverter(),
 )
-publisher = OutboxPublisher(repo=outbox_repo, broker=broker)
 
 while not shutdown:
-    result = await publisher.publish_batch(worker_id="publisher-1", batch_size=100)
+    async with session_factory() as session, session.begin():   # the commit is yours
+        repo = PostgresOutboxRepository(session, model_class=OutboxEventDB)
+        result = await OutboxPublisher(repo, broker).publish_batch(
+            worker_id="publisher-1",
+            batch_size=100,
+        )
     if not result.processed_event_ids:
         await asyncio.sleep(1.0)
 ```
+
+Drop the transaction and the cycle publishes for nothing: the lock and the completion roll
+back with the session, the rows are still `pending`, and the next cycle sends them again.
 
 ## Transactional Inbox
 
@@ -122,37 +134,78 @@ Use `create_inbox_processor` when you want to ingest messages quickly (commit on
 ```python
 from omni_box import InboxEvent, create_inbox_processor
 from omni_box.core.protocols import InboxEventRepository
+from omni_box.infra.storage.postgres import PostgresInboxRepository
 
 async def my_handler(event: InboxEvent, repo: InboxEventRepository):
     print(f"Processing {event.event_type} ({event.message_id})")
 
-processor = create_inbox_processor(
-    repo=inbox_repo,
-    handler=my_handler,
-    job_name="my_inbox_job",
-)
-
-await processor.process_batch(worker_id="worker-1", batch_size=50)
+async with session_factory() as session, session.begin():    # the commit is yours here too
+    processor = create_inbox_processor(
+        repo=PostgresInboxRepository(session, model_class=InboxEventDB),
+        handler=my_handler,
+        job_name="my_inbox_job",
+    )
+    await processor.process_batch(worker_id="worker-1", batch_size=50)
 ```
+
+The batch processor owns the retry budget: a handler that fails leaves the row `pending` with
+`attempts_made + 1` until `max_attempts`, which is why draining rows here — rather than in the
+runner's handler — is how you get retries out of the table.
 
 ### Option C — automated event routing
 
+`EventRouter` keys handlers by `(topic, event_type, schema_version)`, and
+`create_dispatching_processor` dispatches on the event's `source` as the topic.
+
+The `@event_handler` decorator only *marks* a method — it registers nothing on its own. Give
+the router a plain function through `register_handler`, or a `BaseEventHandler` subclass it
+can sweep:
+
 ```python
-from omni_box import EventRouter, create_dispatching_processor, event_handler, InboxEvent
+from omni_box import (
+    BaseEventHandler,
+    EventRouter,
+    InboxEvent,
+    create_dispatching_processor,
+    event_handler,
+)
 from omni_box.core.protocols import InboxEventRepository
 
 router = EventRouter()
 
-@event_handler(event_type="user.created", source="users")
-async def handle_user_created(event: InboxEvent, repo: InboxEventRepository, uow):
+
+# … either a plain function, registered explicitly …
+async def handle_user_deleted(event: InboxEvent, repo: InboxEventRepository, uow) -> None:
     ...
+
+
+router.register_handler(event_type="user.deleted", topic="users", handler=handle_user_deleted)
+
+
+# … or a class whose decorated methods the router sweeps.
+class UserHandlers(BaseEventHandler):
+    topic = "users"                      # the source the events arrive with
+
+    @event_handler("user.created")       # optional: topic=..., schema_version=...
+    async def on_created(self, event: InboxEvent, repo: InboxEventRepository, uow) -> None:
+        ...
+
+
+router.register_instance(UserHandlers())
 
 processor = create_dispatching_processor(
     repo=inbox_repo,
     router=router,
-    dependencies={"uow": uow},
+    dependencies={"uow": uow},           # passed as keyword arguments to the handler
 )
 ```
+
+Extra keyword arguments named in `dependencies` are passed to every handler, so each handler
+signature must accept them. An event with no matching handler comes back as a failed
+`EventHandlerResult` reading `No handler for topic=… event_type=… v=…`.
+
+Building the pipeline yourself? `create_dispatching_handler(router, **dependencies)` from
+`omni_box.core.dispatch` is the router-backed handler this factory installs.
 
 ## Customising the pipeline
 

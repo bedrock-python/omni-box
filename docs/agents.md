@@ -287,7 +287,7 @@ Commit semantics, exactly as the runner implements them:
 | `AT_MOST_ONCE` | before the transaction is even attempted |
 | `AT_LEAST_ONCE` + `ON_PERSIST` | after the transaction, success or failure |
 | `AT_LEAST_ONCE` + `ON_SUCCESS` | only when the handler returned a result with `processed=True` |
-| `EXACTLY_ONCE_INBOX` | when there is no handler, when the handler succeeded, when it skipped, or when the row was already `completed` — and on a handler exception only if `exactly_once_commit_on_failed=True` |
+| `EXACTLY_ONCE_INBOX` | when there is no handler, when the handler succeeded, when it skipped, or when the row was already `completed` — and on a handler exception only if `exactly_once_commit_on_failed=True`. Not when another worker held the row's lock: the handler did not run, so the message is left for redelivery |
 
 ### Factories (`omni_box.application.factories`)
 
@@ -308,9 +308,11 @@ All three return an `EventBatchProcessor` and share `metrics=None`, `dlq_storage
 
 A step implements `async def execute(event, context) -> StepResult` and may implement
 `on_batch_start` / `on_batch_end` / `on_event_start` / `on_event_end`; subclass
-`BaseProcessingStep` to get no-op hooks. `StepResult.next()` continues,
-`StepResult.skip()` drops the rest of the pipeline for this event, `StepResult.stop()`
-ends the whole batch.
+`BaseProcessingStep` to get no-op hooks. The `ProcessingContext` it is handed carries
+`repo`, `worker_id`, `metrics`, the result lists, an `extra` dict of your own, and
+`shutdown_requested` — the predicate `process_batch` was called with.
+`StepResult.next()` continues, `StepResult.skip()` drops the rest of the pipeline for this
+event, `StepResult.stop()` ends the whole batch.
 
 | Step (`omni_box.core.pipeline.steps`) | What it does |
 |---|---|
@@ -349,7 +351,8 @@ sweep a `BaseEventHandler` subclass for methods marked with
 **dependencies)` tries the exact `schema_version`, then a registered migration
 (`BaseEventSchema.register_migration`), then the version-agnostic entry, and returns a
 failed `EventHandlerResult` when nothing matches. `create_dispatching_processor` passes
-`event.source` as the topic.
+`event.source` as the topic; `create_dispatching_handler(router, **dependencies)` is the
+handler it installs, for when you assemble the pipeline yourself.
 
 ### PostgreSQL (`omni_box.infra.storage.postgres`, extra `postgres`)
 
@@ -383,7 +386,10 @@ tracing ids).
 ### Elsewhere
 
 `omni_box.infra.metrics` (extra `metrics`) — `PrometheusOutboxMetrics(prefix=None)`,
-`PrometheusInboxMetrics(prefix=None)`. `omni_box.contrib.settings` (extra `settings`) —
+`PrometheusInboxMetrics(prefix=None)`; `ProcessingMetrics` is the shared base of the two
+protocols, not a third implementation. `EventBatchProcessor` sets
+`set_locked_batch_size(len(batch))` after every fetch, zero included.
+`omni_box.contrib.settings` (extra `settings`) —
 `BaseOutboxSettings` / `BaseInboxSettings`, reading `OMNI_OUTBOX_` / `OMNI_INBOX_` with
 `__` as the nesting delimiter. `omni_box.contrib.dishka` (extra `dishka`) —
 `EventDispatcherProvider`, `DIAwareEventRouter`, `create_di_router`.
@@ -409,7 +415,10 @@ tracing ids).
 4. **A handler passed to `InboxConsumerRunner` runs inside the transaction that inserts the
    inbox row.** If it raises, the insert rolls back with it — there is no `pending` row left
    behind to retry from, and the retry has to come from the broker. That is the exactly-once
-   *effect* the pattern gives you: the side effect and the record of it commit together.
+   *effect* the pattern gives you: the side effect and the record of it commit together. The
+   runner takes the row's lock first and only runs the handler if it got it; when someone
+   else holds it you get `processed=False, duplicate=False, committed=False` and the broker
+   redelivers.
 5. **The runner never records a failure.** It calls neither `mark_failed` nor anything that
    increments `attempts_made`, so `max_attempts` does nothing on that path. The retry budget
    only exists for the batch processors (`create_*_processor`, `EventBatchProcessor`).
@@ -457,8 +466,11 @@ tracing ids).
 17. **The tables are yours.** No `Base`, no migrations, no DDL. Bind the abstract bases to
     your `DeclarativeBase` and generate the migration yourself; the repositories depend on the
     column names, so keep them.
-18. **`shutdown_requested_func` is accepted and ignored.** It is forwarded from
-    `publish_batch` to `process_batch` and never consulted. Handle shutdown between batches.
+18. **`shutdown_requested_func` stops a batch, it does not abort an event.** It is polled
+    before the fetch — returning `True` there locks nothing at all — and again before each
+    event. What was already processed is committed; the events left untouched come back in
+    `remaining_event_ids`, still locked, for `release_stale_locks` or your own
+    `release_lock` to clear. The event in flight always runs to completion.
 19. **There is no scheduler.** The relay loop, its sleep, its shutdown and the maintenance
     cadence are yours to write.
 

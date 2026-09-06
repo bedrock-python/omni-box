@@ -59,6 +59,7 @@ Combine as needed, e.g. `pip install "omni-box[postgres,kafka,metrics]"`.
 from omni_box import OmniBoxDomainService, OutboxPublisher
 from omni_box.core.converters import EnvelopeEventConverter
 from omni_box.infra.brokers.kafka import KafkaEventPublisher
+from omni_box.infra.storage.postgres import PostgresOutboxRepository
 
 # 1. Persist the event in the same DB transaction as your business state.
 domain = OmniBoxDomainService()
@@ -75,15 +76,23 @@ async with uow.transaction() as tx:        # your own UoW, not part of omni-box
     await tx.users.create(user)
     await tx.outbox.create(event)
 
-# 2. A background worker reads pending rows and publishes them.
+# 2. A background worker reads pending rows and publishes them, in a transaction of
+#    its own. Nothing in omni-box commits: the fetch, the lock, the publish and the
+#    status update are one unit of work, and it is yours to open and commit.
 broker = KafkaEventPublisher(producer=kafka_producer, converter=EnvelopeEventConverter())
-publisher = OutboxPublisher(repo=outbox_repo, broker=broker)
 
 while not shutdown:
-    result = await publisher.publish_batch(worker_id="publisher-1", batch_size=100)
+    async with session_factory() as session, session.begin():   # the commit is yours
+        repo = PostgresOutboxRepository(session, model_class=OutboxEventDB)
+        result = await OutboxPublisher(repo, broker).publish_batch(
+            worker_id="publisher-1",
+            batch_size=100,
+        )
     if not result.processed_event_ids:
         await asyncio.sleep(1.0)
 ```
+
+Forget that transaction and nothing happened: the lock and the completion roll back with the session, the rows stay `pending`, and the next cycle publishes them again.
 
 `OutboxPublisher` is defined in `omni_box.application.services.publish`. Under the hood it builds an `EventBatchProcessor` via `create_outbox_processor`, so you get fetch, lock, retry, metrics and (optionally) DLQ for free.
 

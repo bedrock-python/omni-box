@@ -368,6 +368,82 @@ async def test__inbox_message_processor__no_handler__skips_lock_and_run() -> Non
     assert repo.completed == []
 
 
+async def test__inbox_message_processor__lock_taken_by_another_worker__skips_handler_invocation() -> None:
+    # Arrange
+    repo = _FakeInboxRepo()
+    called: list[bool] = []
+
+    async def locked_elsewhere(event_id: UUID, worker_id: str) -> bool:
+        repo.processing.append((event_id, worker_id))
+        return False
+
+    repo.mark_processing = locked_elsewhere  # type: ignore[method-assign]
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> EventHandlerResult:
+        called.append(True)
+        return handler_completed()
+
+    processor = InboxMessageProcessor(
+        transaction_provider=_FakeTxProvider(repo),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+    event = processor.create_event(_make_message())
+
+    # Act
+    stored, result, error, started_at = await processor.process_in_transaction(event)
+
+    # Assert
+    assert stored is not None
+    assert called == []
+    assert result is None
+    assert error is None
+    assert started_at == 0.0
+    assert repo.processing == [(event.id, "w1")]
+    assert repo.completed == []
+
+
+async def test__inbox_consumer_runner__lock_taken_by_another_worker__does_not_commit_offset() -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack, event_type="t")])
+    repo = _FakeInboxRepo()
+
+    async def locked_elsewhere(event_id: UUID, worker_id: str) -> bool:
+        return False
+
+    repo.mark_processing = locked_elsewhere  # type: ignore[method-assign]
+
+    called: list[bool] = []
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> EventHandlerResult:
+        called.append(True)
+        return handler_completed()
+
+    metrics = _FakeInboxMetrics()
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(repo),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+        ack_strategy=AckStrategy.EXACTLY_ONCE_INBOX,
+        metrics=metrics,
+    )
+
+    # Act
+    result = await runner.process_one()
+
+    # Assert
+    assert called == []
+    assert result.processed is False
+    assert result.duplicate is False
+    assert result.committed is False
+    assert ack.commit_count == 0
+    assert metrics.failed == []
+
+
 async def test__inbox_message_processor__stored_already_completed__skips_handler_invocation() -> None:
     # Arrange
     repo = _FakeInboxRepo(create_returns_completed=True)

@@ -108,10 +108,6 @@ class InboxMessageProcessor:
         try:
             async with self._transaction_provider.transaction() as repo:
                 stored = await repo.create(event)
-                if stored and stored.status != EventStatus.COMPLETED and self._handler is not None:
-                    # Only lock if we have a handler to process it now.
-                    # Otherwise, leave it as PENDING for the batch processor.
-                    await repo.mark_processing(stored.id, self._worker_id)
 
                 logger.info(
                     "Processing inbox event",
@@ -122,24 +118,36 @@ class InboxMessageProcessor:
                 )
 
                 if stored and stored.status != EventStatus.COMPLETED and self._handler is not None:
-                    started_at = perf_counter()
-                    try:
-                        raw = await asyncio.wait_for(
-                            self._handler(stored, repo),
-                            timeout=self._process_timeout,
+                    # Only lock if we have a handler to process it now.
+                    # Otherwise, leave it as PENDING for the batch processor.
+                    if not await repo.mark_processing(stored.id, self._worker_id):
+                        # The row is locked elsewhere (or no longer PENDING): running the
+                        # handler here would duplicate work the lock holder is doing and
+                        # then roll back on ``mark_completed``.
+                        logger.info(
+                            "Inbox event is not ours to process; leaving it to the lock holder",
+                            event_id=str(stored.id),
+                            message_id=stored.message_id,
                         )
-                        handler_result = coerce_handler_outcome(raw)
-                        if handler_result.success:
-                            await repo.mark_completed(stored.id, self._worker_id)
-                            logger.info(
-                                "Inbox event processed successfully",
-                                event_id=str(stored.id),
-                                message_id=stored.message_id,
-                                duration_seconds=round(perf_counter() - started_at, 4),
+                    else:
+                        started_at = perf_counter()
+                        try:
+                            raw = await asyncio.wait_for(
+                                self._handler(stored, repo),
+                                timeout=self._process_timeout,
                             )
-                    except Exception as exc:
-                        handler_error = exc
-                        raise
+                            handler_result = coerce_handler_outcome(raw)
+                            if handler_result.success:
+                                await repo.mark_completed(stored.id, self._worker_id)
+                                logger.info(
+                                    "Inbox event processed successfully",
+                                    event_id=str(stored.id),
+                                    message_id=stored.message_id,
+                                    duration_seconds=round(perf_counter() - started_at, 4),
+                                )
+                        except Exception as exc:
+                            handler_error = exc
+                            raise
         except Exception as e:
             # Distinguish handler failures (already captured above) from
             # transactional/storage failures so the caller can choose how to

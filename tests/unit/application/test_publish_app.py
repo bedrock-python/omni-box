@@ -168,6 +168,35 @@ async def test__outbox_publisher__pending_events__publishes_all_and_marks_comple
     assert outbox.fetch_calls == [(100, "w1", 300)]
 
 
+async def test__outbox_publisher__shutdown_requested_mid_batch__stops_and_reports_remaining() -> None:
+    # Arrange
+    event1 = create_fake_event(id=uuid4(), topic="t1")
+    event2 = create_fake_event(id=uuid4(), topic="t2")
+    outbox = FakeOutboxStore(pending_events=[event1, event2])
+    stopping = {"now": False}
+
+    class _StoppingBroker(FakeEventPublisher):
+        async def publish(self, event: Any, repo: Any) -> None:
+            await super().publish(event, repo)
+            stopping["now"] = True
+
+    broker = _StoppingBroker()
+    publisher = OutboxPublisher(outbox, broker)
+
+    # Act
+    result = await publisher.publish_batch(
+        worker_id="w1",
+        batch_size=100,
+        shutdown_requested_func=lambda: stopping["now"],
+    )
+
+    # Assert
+    assert [e.id for e in broker.published_events] == [event1.id]
+    assert outbox.published_ids == [event1.id]
+    assert result.processed_event_ids == [event1.id]
+    assert result.remaining_event_ids == {event2.id}
+
+
 async def test__outbox_publisher__broker_failure__marks_event_failed() -> None:
     # Arrange
     event = create_fake_event(id=uuid4(), topic="topic.fail")
