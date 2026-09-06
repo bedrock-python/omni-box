@@ -199,15 +199,15 @@ new object.
 | `id` | `UUID` | `uuid4()` |
 | `event_type` | `str`, ≤100 chars, stripped, non-empty | required |
 | `payload` | `dict[str, JsonValue]` | required, non-empty, ≤1 000 000 bytes of JSON |
-| `headers` | `dict[str, str] \| None` | `None`; ≤100 entries, key ≤64, value ≤512 |
+| `headers` | `dict[str, str] | None` | `None`; ≤100 entries, key ≤64, value ≤512 |
 | `status` | `EventStatus` | `PENDING` |
 | `attempts_made` / `max_attempts` | `int` | `0` / `6` |
-| `last_error` | `str \| None` | `None`, truncated to 2000 bytes |
+| `last_error` | `str | None` | `None`, truncated to 2000 bytes |
 | `created_at` / `scheduled_at` | aware `datetime`, normalised to UTC | now |
 | `completed_at` / `locked_at` / `locked_by` | | `None` |
-| `trace_id` `correlation_id` `causation_id` | `str \| None`, ≤64 | `None` |
-| `idempotency_key` | `str \| None`, ≤128 | `None` |
-| `schema_version` | `str \| None`, ≤50 | `None` |
+| `trace_id` `correlation_id` `causation_id` | `str | None`, ≤64 | `None` |
+| `idempotency_key` | `str | None`, ≤128 | `None` |
+| `schema_version` | `str | None`, ≤50 | `None` |
 
 `OutboxEvent` adds `aggregate_type` (≤50), `aggregate_id` (`UUID`), `topic` (≤255),
 `partition_key` (≤255) — all required. `InboxEvent` adds `message_id` (≤255),
@@ -249,12 +249,12 @@ Constructor keywords, all optional: `max_attempts=6`, `scheduled_at_skew_seconds
 |---|---|---|
 | `capabilities` (property) | `EventRepository[T]` | `RepositoryCapabilities(supports_bulk, supports_distributed_locking, supports_retention)` |
 | `create(event)` | `EventRepository[T]` | the row **that is in the table** — the existing one on a duplicate |
-| `get_by_id(event_id)` | `EventRepository[T]` | `T \| None` |
+| `get_by_id(event_id)` | `EventRepository[T]` | `T | None` |
 | `fetch_pending(limit, **filters)` | `EventRepository[T]` | `list[T]`, `pending`, unlocked, due, with budget left |
 | `mark_processing(event_id, worker_id)` | `EventRepository[T]` | `bool` — `False` when someone else holds it |
 | `mark_completed(event_id, worker_id)` | `EventRepository[T]` | `None`; raises `EventConcurrentUpdateError` |
 | `mark_failed(event_id, error, worker_id, next_retry_at, count_as_attempt=True)` | `EventRepository[T]` | `None` |
-| `get_by_message_id(message_id, consumer_group)` | `InboxEventRepository` | `InboxEvent \| None` |
+| `get_by_message_id(message_id, consumer_group)` | `InboxEventRepository` | `InboxEvent | None` |
 | `exists(message_id, consumer_group)` | `InboxEventRepository` | `bool` |
 | `has_completed_sibling_for_inbox_key(message_id, consumer_group, exclude_event_id)` | `InboxEventRepository` | `bool` |
 
