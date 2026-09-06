@@ -9,6 +9,16 @@ Unified transactional messaging primitives for the **Transactional Outbox** and 
 [![codecov](https://codecov.io/gh/bedrock-python/omni-box/graph/badge.svg)](https://codecov.io/gh/bedrock-python/omni-box)
 [![Docs](https://img.shields.io/badge/docs-online-blue)](https://bedrock-python.github.io/omni-box/)
 
+> [!TIP]
+> **Building this with an AI assistant?** Hand it
+> **[one page](https://bedrock-python.github.io/omni-box/agents/)** instead of the whole
+> site: the public API surface, where the transactional boundary sits and what it
+> guarantees, the rules that break code when they are broken — the commit you own, the
+> deduplication window, the retry budget that does not apply to the consumer runner — the
+> mistakes models actually make, and a map of which page to fetch for the rest. Every docs
+> page is also served as raw Markdown at its own URL, and a **Copy page** button at the top
+> of each one hands it straight to a chat window.
+
 The library ships:
 
 - Domain entities (`OutboxEvent`, `InboxEvent`) and a `OmniBoxDomainService` factory.
@@ -141,6 +151,9 @@ For detailed component reference see [`docs/api_reference.md`](docs/api_referenc
 - [Custom storage adapters](docs/storage_adapters.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [API reference](docs/api_reference.md)
+- [For AI agents](https://bedrock-python.github.io/omni-box/agents/) — the whole API
+  surface, the rules that break code when broken and a map of the rest, on one page to hand
+  to a coding assistant
 
 ## License
 
