@@ -132,7 +132,10 @@ target-version = "py312"
 # Yandex.Disk creates duplicate files with non-ASCII suffixes such as
 # ``... (копия с компьютера X).py``. They are not real modules and trip the
 # N999 (invalid module name) rule; they should be cleaned up out-of-band.
-extend-exclude = ["**/* (копия*).py"]
+# The Markdown guides hold fragments -- a keyword argument on its own, a body
+# without its def -- that read as code to a formatter and come out as
+# something else. ruff 0.16 formats fenced Python in Markdown by default.
+extend-exclude = ["**/* (копия*).py", "*.md"]
 
 [tool.ruff.lint]
 select = ["F", "E", "W", "I", "B", "N", "S", "C4", "DTZ", "SIM", "TRY", "PERF", "RUF", "UP", "ANN", "T20", "PTH", "PLC", "PLE", "PLW"]
