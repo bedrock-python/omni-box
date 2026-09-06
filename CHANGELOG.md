@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.1...omni-box-v0.1.2) (2026-09-06)
+
+
+### Documentation
+
+* org-wide security policy and code of conduct ([#18](https://github.com/bedrock-python/omni-box/issues/18)) ([f6886d4](https://github.com/bedrock-python/omni-box/commit/f6886d468bb5ae75fc3515dc85bb1f3a92f75ee6))
+
 ## [0.1.1](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.0...omni-box-v0.1.1) (2026-08-28)
 
 
