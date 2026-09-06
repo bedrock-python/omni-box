@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.1...omni-box-v0.1.2) (2026-09-06)
+
+
+### Bug Fixes
+
+* honour shutdown_requested_func and a held inbox lock ([#27](https://github.com/bedrock-python/omni-box/issues/27)) ([2ce02a6](https://github.com/bedrock-python/omni-box/commit/2ce02a6047ca129acd73479e7f407a662944f08c))
+
 ## [0.1.1](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.0...omni-box-v0.1.1) (2026-08-28)
 
 
