@@ -12,7 +12,7 @@ print(omni_box.__version__)
 
 Imported from `omni_box` (defined in `omni_box.core.models`).
 
-- **`BaseEvent`** — common fields: `id`, `event_type`, `payload`, `headers`, `status`, `attempts_made`, `max_attempts`, `last_error`, timing (`scheduled_at`, `completed_at`, `created_at`, `updated_at`), locking (`locked_at`, `locked_by`), tracing (`trace_id`, `correlation_id`, `causation_id`, `idempotency_key`, `schema_version`).
+- **`BaseEvent`** — common fields: `id`, `event_type`, `payload`, `headers`, `status`, `attempts_made`, `max_attempts`, `last_error`, timing (`created_at`, `scheduled_at`, `completed_at`), locking (`locked_at`, `locked_by`), tracing (`trace_id`, `correlation_id`, `causation_id`, `idempotency_key`, `schema_version`). There is no `updated_at` on the entity — that column lives on the ORM mixin (`EventMixin`) only.
 - **`OutboxEvent`** — adds `aggregate_type`, `aggregate_id`, `topic`, `partition_key`.
 - **`InboxEvent`** — adds `message_id`, `consumer_group`, `source`.
 - **`BaseEventSchema`** — Pydantic schema base used by ad-hoc payload models.
@@ -60,7 +60,7 @@ Fluent builder. Picks `DistributedLockingFetchStrategy` + `BulkCommitStrategy` a
 | `add_step(step)` | Append a `ProcessingStep[T]`. |
 | `with_fetch_strategy(strategy)` | Override the auto-picked fetch strategy. |
 | `with_commit_strategy(strategy)` | Override the auto-picked commit strategy. |
-| `with_metrics(metrics)` | Wire a `ProcessingMetrics` collector. |
+| `with_metrics(metrics)` | Wire a `ProcessingMetrics` collector. Steps reach it as `ProcessingContext.metrics`. |
 | `with_lease_ttl(seconds)` | Lock TTL used by `DistributedLockingFetchStrategy`. |
 | `with_job_name(name)` | Logging/metrics label. |
 | `build()` | Returns an `EventBatchProcessor[T]`. |
@@ -69,13 +69,16 @@ Fluent builder. Picks `DistributedLockingFetchStrategy` + `BulkCommitStrategy` a
 
 - `process_batch(worker_id, batch_size, shutdown_requested_func=None, **fetch_filters) -> BatchProcessingResult`
 - `BatchProcessingResult` carries `processed_event_ids`, `failed_counted`, `failed_noncounted`, `remaining_event_ids`, `commit_failed`.
+- `shutdown_requested_func` is polled before the fetch and before every event. Once it returns `True` the
+  batch stops: what was already processed is committed, and the events left untouched come back in
+  `remaining_event_ids`. Asked before the fetch, it locks nothing at all.
 
 ### Built-in steps (`omni_box.core.pipeline.steps`)
 
 | Step | Purpose | Notes |
 | :--- | :--- | :--- |
 | `HandlerExecutionStep` | Runs the user handler inside the pipeline with a timeout. | Required terminal step in every processor. |
-| `SiblingDeduplicationStep` | Skips an `InboxEvent` if a sibling row with the same `(message_id, consumer_group)` is already `completed`. | Calls `InboxEventRepository.has_completed_sibling_for_inbox_key`. |
+| `SiblingDeduplicationStep` | Skips an `InboxEvent` if a sibling row with the same `(message_id, consumer_group)` is already `completed`. | Calls `InboxEventRepository.has_completed_sibling_for_inbox_key`. A no-op on a non-partitioned table — see [storage adapters](storage_adapters.md#inboxeventrepository). |
 | `MetricsStep` | Pushes batch lifecycle counters into an `InboxMetrics` / `OutboxMetrics` sink. | |
 | `OpenTelemetryStep(service_name=...)` | Creates spans for each batch/event. | Requires `opentelemetry` extra. |
 | `CircuitBreakerStep(failure_threshold, recovery_timeout_seconds)` | Stops batch processing after consecutive failures. | **State is process-local; not distributed.** Add Redis-backed coordination if you need cross-replica behaviour. |
@@ -100,7 +103,10 @@ OutboxPublisher(
 )
 ```
 
-- `publish_batch(worker_id, batch_size, shutdown_requested_func=None, **fetch_filters)`
+- `publish_batch(worker_id, batch_size, shutdown_requested_func=None, **fetch_filters)` — one
+  fetch/lock/publish/write-back cycle through the session behind `repo`. The library opens no
+  transaction and commits nothing: wrap the call in one of your own. `shutdown_requested_func`
+  behaves as it does on `process_batch` above.
 
 ### `InboxConsumerRunner` (`omni_box.application.services.consume`)
 
@@ -141,16 +147,30 @@ All three return `EventBatchProcessor[T]`.
 
 ## Dispatch (`omni_box.core.dispatch`)
 
-- `EventRouter` — registry of handlers keyed by `(event_type, source)`.
-- `BaseEventHandler` — base class for class-based handlers.
-- `event_handler(event_type, source=...)` — decorator.
+- `EventRouter(normalize_topic=None)` — registry of handlers keyed by `(topic, event_type, schema_version)`.
+  `register_handler(event_type, topic, handler, schema_version=None, handler_name=None)` registers a
+  callable; `register_class(cls, topic=None)` / `register_instance(obj, topic=None)` sweep a
+  `BaseEventHandler` for decorated methods. `dispatch(event, topic, repo, **dependencies)` tries the exact
+  `schema_version`, then a registered migration, then the version-agnostic entry, and returns a failed
+  `EventHandlerResult` when nothing matches.
+- `BaseEventHandler` — base class for class-based handlers; set `topic` on the subclass.
+- `event_handler(event_type, topic=None, schema_version=None)` — decorator. There is no `source`
+  parameter, and the decorator only marks the method: a router has to register it.
+  `create_dispatching_processor` dispatches on `event.source` as the topic.
+- `create_dispatching_handler(router, **dependencies)` — the router-backed handler that
+  `create_dispatching_processor` installs; use it when you assemble the pipeline yourself.
+- `DispatchName` (`str | StrEnum`) and `as_dispatch_str(name)` — the topic / event-type spellings
+  accepted by everything above.
 
 ## Handler results
 
 From `omni_box.core.services.results`, re-exported at the top level.
 
 - `EventHandlerStatus`, `EventHandlerResult`, `BatchProcessingResult`.
-- Helpers: `handler_completed()`, `handler_retry(error)`, `handler_skipped(reason)`.
+- Helpers: `handler_completed(status=EventHandlerStatus.COMPLETED)`,
+  `handler_retry(message, *, count_as_attempt=True, next_retry_at=None, status=EventHandlerStatus.RETRY)`,
+  `handler_skipped(status=EventHandlerStatus.SKIPPED)`. All three take a `status`, not a free-text reason;
+  the message on a retry is the one written to `last_error`.
 
 ## Converters (`omni_box.core.converters`)
 
@@ -188,7 +208,7 @@ Neither adapter depends on any external "kit" package; only `aiokafka` is requir
 
 ### Prometheus (extra: `metrics`)
 
-`omni_box.infra.metrics` provides Prometheus implementations of `InboxMetrics`, `OutboxMetrics`, and `ProcessingMetrics`. Wire them into the factories or pass to `MetricsStep` directly.
+`omni_box.infra.metrics` provides `PrometheusInboxMetrics(prefix=None)` and `PrometheusOutboxMetrics(prefix=None)` — implementations of `InboxMetrics` and `OutboxMetrics`. `ProcessingMetrics` is the shared base of those two protocols and has no implementation of its own. Wire them into the factories or pass to `MetricsStep` directly.
 
 ## Version
 
