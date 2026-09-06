@@ -10,7 +10,7 @@ uv add omni-box
 pip install omni-box
 ```
 
-Optional extras (see [`README.md`](../README.md#installation) for the full list): `postgres`, `kafka`, `metrics`, `opentelemetry`, `settings`, `dishka`.
+Optional extras (see [the extras table](index.md#optional-extras) for the full list): `postgres`, `kafka`, `metrics`, `opentelemetry`, `settings`, `dishka`.
 
 ## Basic concepts
 
