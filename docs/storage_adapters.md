@@ -46,6 +46,13 @@ async def has_completed_sibling_for_inbox_key(
 ) -> bool: ...
 ```
 
+`has_completed_sibling_for_inbox_key` only earns its keep on a partitioned table.
+`PostgresInboxRepository` returns `False` without querying anything unless the deduplication
+key carries `created_at` — on a plain table the unique index on `(message_id, consumer_group)`
+already makes a completed sibling impossible, so `SiblingDeduplicationStep` is a no-op there.
+Implement it honestly in your own adapter if your storage can hold two rows for one logical
+key; returning `False` is correct when it cannot.
+
 ### Capability protocols
 
 Live in `omni_box.core.protocols.features`. Implement only what your storage can do efficiently.
