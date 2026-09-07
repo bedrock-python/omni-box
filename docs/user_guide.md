@@ -95,7 +95,7 @@ This is the typical "one Kafka message per transaction" loop with configurable c
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-from omni_box import AckStrategy, InboxConsumerRunner
+from omni_box import AckStrategy, InboxConsumerRunner, InboxEvent
 from omni_box.core.protocols import InboxEventRepository
 from omni_box.core.protocols.transaction import InboxTransactionProviderProtocol
 
@@ -111,10 +111,16 @@ class InboxTxProvider(InboxTransactionProviderProtocol):
             yield self._repo_factory(session)
 
 
+async def handle_inbox_event(event: InboxEvent, repo: InboxEventRepository) -> None:
+    await repo.session.execute(             # the transaction the inbox row is in
+        invoices.insert().values(order_id=event.payload["order_id"])
+    )
+
+
 runner = InboxConsumerRunner(
     consumer=kafka_consumer_adapter,
     transaction_provider=InboxTxProvider(session_factory, lambda s: PostgresInboxRepository(s, model_class=InboxEventDB)),
-    handler=handle_inbox_event,     # optional in-tx handler
+    handler=handle_inbox_event,     # optional; runs inside the same transaction
     worker_id="worker-1",
     consumer_group="identity-service",
     ack_strategy=AckStrategy.EXACTLY_ONCE_INBOX,
@@ -126,6 +132,11 @@ try:
 finally:
     await runner.stop()
 ```
+
+The handler runs inside the transaction that inserts the inbox row, and `repo.session` is that
+transaction. Write the side effect through it and the invoice and the inbox row commit
+together — or roll back together when the handler raises. A session the handler opens itself
+is a second transaction and does not get that.
 
 ### Option B — batch processing already-stored inbox rows
 

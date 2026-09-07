@@ -81,13 +81,38 @@ rows stay `pending` and the next cycle republishes them.
 
 ## 5. Consume into the inbox
 
+The runner opens a transaction through your provider, inserts the inbox row, runs the
+handler inside that same transaction, and commits the broker offset according to the
+`AckStrategy`. `repo.session` is that transaction: write the side effect through it and it
+commits with the inbox row, or rolls back with it when the handler raises. A session the
+handler opens itself is a second transaction and does not get that.
+
 ```python
-from omni_box import AckStrategy, InboxConsumerRunner
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from omni_box import AckStrategy, InboxConsumerRunner, InboxEvent, InboxEventRepository
+from omni_box.core.protocols.transaction import InboxTransactionProviderProtocol
+from omni_box.infra.storage.postgres import PostgresInboxRepository
+
+
+class InboxTxProvider(InboxTransactionProviderProtocol):
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[InboxEventRepository]:
+        async with session_factory() as session, session.begin():   # the commit is yours
+            yield PostgresInboxRepository(session, model_class=InboxEventDB)
+
+
+async def handle(event: InboxEvent, repo: InboxEventRepository) -> None:
+    await repo.session.execute(             # the transaction the inbox row is in
+        profiles.insert().values(email=event.payload["email"])
+    )
+
 
 runner = InboxConsumerRunner(
     consumer=kafka_consumer_adapter,
-    transaction_provider=my_inbox_tx_provider,
-    handler=my_handler,
+    transaction_provider=InboxTxProvider(),
+    handler=handle,
     worker_id="worker-1",
     consumer_group="identity-service",
     ack_strategy=AckStrategy.EXACTLY_ONCE_INBOX,
@@ -99,5 +124,3 @@ try:
 finally:
     await runner.stop()
 ```
-
-The `transaction_provider` must implement `InboxTransactionProviderProtocol` from `omni_box.core.protocols.transaction`.

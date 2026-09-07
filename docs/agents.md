@@ -168,7 +168,9 @@ class InboxTxProvider(InboxTransactionProviderProtocol):
 
 
 async def handle(event: InboxEvent, repo: InboxEventRepository) -> None:
-    await do_the_work(event.payload)        # same transaction as the inbox row
+    await repo.session.execute(             # the transaction the inbox row is in
+        invoices.insert().values(order_id=event.payload["order_id"])
+    )
 
 
 runner = InboxConsumerRunner(
@@ -257,6 +259,7 @@ Constructor keywords, all optional: `max_attempts=6`, `scheduled_at_skew_seconds
 | `get_by_message_id(message_id, consumer_group)` | `InboxEventRepository` | `InboxEvent | None` |
 | `exists(message_id, consumer_group)` | `InboxEventRepository` | `bool` |
 | `has_completed_sibling_for_inbox_key(message_id, consumer_group, exclude_event_id)` | `InboxEventRepository` | `bool` |
+| `session` (property) | `PostgresOutboxRepository`, `PostgresInboxRepository` — not on the protocol | `AsyncSession` — the transaction the repository runs in; an inbox handler writes its side effects through it |
 
 `FetchFilters` is a `TypedDict`: `source`, `topic`, `aggregate_type`, `aggregate_id`, each
 a value or a list. Capability protocols in `omni_box.core.protocols.features`:
@@ -364,9 +367,12 @@ include_created_at_in_unique=False)` and `UnConstrainedEnum`.
 `PostgresOutboxRepository(session, *, model_class, conflict_index_id=None,
 conflict_index_idempotency=None, batch_size=1000, error_max_length=2000,
 truncation_suffix=…, scheduled_at_skew_seconds=60)` and `PostgresInboxRepository(...)` with
-the same keywords. Both implement every capability protocol, and both expose
-`requeue_failed(event_id) -> bool` from the shared base — the only way to move a `failed`
-row back to `pending`.
+the same keywords. Both implement every capability protocol, and both expose two things
+from the shared base: `session`, read-only, the `AsyncSession` the repository was built on —
+in a handler passed to `InboxConsumerRunner` it is the transaction the inbox row is in — and
+`requeue_failed(event_id) -> bool`, the only way to move a `failed` row back to `pending`.
+A handler receives `repo` typed as `InboxEventRepository`, which has no session; narrow it
+with `isinstance(repo, PostgresInboxRepository)` where a type checker needs to see it.
 
 ### Kafka (`omni_box.infra.brokers.kafka`, extra `kafka`)
 
@@ -415,10 +421,12 @@ protocols, not a third implementation. `EventBatchProcessor` sets
 4. **A handler passed to `InboxConsumerRunner` runs inside the transaction that inserts the
    inbox row.** If it raises, the insert rolls back with it — there is no `pending` row left
    behind to retry from, and the retry has to come from the broker. That is the exactly-once
-   *effect* the pattern gives you: the side effect and the record of it commit together. The
-   runner takes the row's lock first and only runs the handler if it got it; when someone
-   else holds it you get `processed=False, duplicate=False, committed=False` and the broker
-   redelivers.
+   *effect* the pattern gives you: the side effect and the record of it commit together —
+   provided the side effect goes through `repo.session`, the `AsyncSession` the row was
+   inserted on. A session the handler opens itself is a second transaction: its writes
+   survive a rollback of the row, and the redelivery does them again. The runner takes the
+   row's lock first and only runs the handler if it got it; when someone else holds it you
+   get `processed=False, duplicate=False, committed=False` and the broker redelivers.
 5. **The runner never records a failure.** It calls neither `mark_failed` nor anything that
    increments `attempts_made`, so `max_attempts` does nothing on that path. The retry budget
    only exists for the batch processors (`create_*_processor`, `EventBatchProcessor`).
@@ -545,6 +553,17 @@ runner = InboxConsumerRunner(..., handler=None, ack_strategy=AckStrategy.AT_LEAS
 processor = create_inbox_processor(repo=inbox_repo, handler=flaky_handler)
 async with session_factory() as session, session.begin():
     await processor.process_batch(worker_id="inbox-1", batch_size=50)
+```
+
+```python
+# WRONG — the handler opens its own session: the invoice commits even when the inbox row rolls back
+async def handle(event: InboxEvent, repo: InboxEventRepository) -> None:
+    async with session_factory() as session, session.begin():
+        await session.execute(invoices.insert().values(order_id=event.payload["order_id"]))
+
+# RIGHT — write through the session the inbox row is on; both commit, or neither does
+async def handle(event: InboxEvent, repo: InboxEventRepository) -> None:
+    await repo.session.execute(invoices.insert().values(order_id=event.payload["order_id"]))
 ```
 
 ## Errors

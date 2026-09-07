@@ -113,6 +113,16 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
             supports_retention=True,
         )
 
+    @property
+    def session(self) -> AsyncSession:
+        """The session this repository is bound to.
+
+        Every repository call runs on it, and so does a handler passed to
+        ``InboxConsumerRunner``: write the handler's side effects through it and
+        they commit and roll back with the inbox row.
+        """
+        return self._session
+
     async def create(self, event: T) -> T:
         try:
             values = self._prepare_insert_values(event)

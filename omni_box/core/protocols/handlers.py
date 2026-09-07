@@ -25,5 +25,15 @@ class InboxHandler[T: InboxEvent](Protocol):
         repo: InboxEventRepository,
         **dependencies: Any,
     ) -> EventHandlerResult | None:
-        """Process an inbox event."""
+        """Process an inbox event.
+
+        ``repo`` is the repository the transaction provider yielded, bound to
+        the transaction the event was inserted in.  With the PostgreSQL
+        repository ``repo.session`` is that transaction's ``AsyncSession``:
+        write the handler's side effects through it and they commit and roll
+        back with the inbox row.  A session opened inside the handler is a
+        second transaction and gives that up.  The parameter is typed as the
+        protocol, which has no session, so a type-checked handler narrows it
+        first: ``isinstance(repo, PostgresInboxRepository)``.
+        """
         ...

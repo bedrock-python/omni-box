@@ -85,7 +85,7 @@ Concrete table classes are owned by the consuming service so it stays in charge 
    - `StorageTimeoutError` — statement / lock timeout.
    - `StorageTransactionError` — transaction abort / serialization failure.
    - `StorageIntegrityError` — unique/PK/FK violations.
-4. **Do not start transactions.** Repository methods run inside a session/connection owned by the caller (a UoW, the `InboxTransactionProviderProtocol`, or the test harness). Never call `commit()` yourself.
+4. **Do not start transactions.** Repository methods run inside a session/connection owned by the caller (a UoW, the `InboxTransactionProviderProtocol`, or the test harness). Never call `commit()` yourself. If inbox handlers need to reach that session or connection, expose it the way the PostgreSQL repositories do: a read-only `session` property.
 5. **Surface capabilities.** Either expose them structurally or via the `capabilities` property — `EventProcessorBuilder.build()` inspects both.
 
 ### Skeleton example

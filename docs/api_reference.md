@@ -194,7 +194,7 @@ All inherit from `OmniBoxError`.
 `omni_box.infra.storage.postgres`:
 
 - ORM bases: `OutboxEventDBBase`, `InboxEventDBBase`, `OutboxEventPartitionedDBBase`, `InboxEventPartitionedDBBase`, plus the underlying `EventMixin`, `OutboxColumnsMixin`, `InboxColumnsMixin`.
-- Repositories: `PostgresOutboxRepository`, `PostgresInboxRepository`, `PostgresEventRepository` (shared base).
+- Repositories: `PostgresOutboxRepository`, `PostgresInboxRepository`, `PostgresEventRepository` (shared base). Both expose `session` — the `AsyncSession` they were built on, read-only — which is how a handler passed to `InboxConsumerRunner` writes its side effects in the transaction that inserts the inbox row.
 - Helpers: `UnConstrainedEnum`, `get_event_constraints(table_name, include_created_at_in_unique=False)`.
 
 ### Kafka (extra: `kafka`)
