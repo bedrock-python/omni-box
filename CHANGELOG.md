@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.2...omni-box-v0.2.0) (2026-09-07)
+
+
+### Features
+
+* **postgres:** expose the session a repository runs on ([#30](https://github.com/bedrock-python/omni-box/issues/30)) ([6c5d675](https://github.com/bedrock-python/omni-box/commit/6c5d67574c8bc900af94775b62dddd11ac3c8cf7)), closes [#29](https://github.com/bedrock-python/omni-box/issues/29)
+
 ## [0.1.2](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.1...omni-box-v0.1.2) (2026-09-06)
 
 
