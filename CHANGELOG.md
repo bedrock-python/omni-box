@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.2.0...omni-box-v0.2.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **outbox:** stop a broker outage from spending the attempt budget ([#33](https://github.com/bedrock-python/omni-box/issues/33)) ([6252f91](https://github.com/bedrock-python/omni-box/commit/6252f9132ef609fb370e183387f447497f0cbca2))
+
 ## [0.2.0](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.1.2...omni-box-v0.2.0) (2026-09-07)
 
 
