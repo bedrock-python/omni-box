@@ -102,6 +102,16 @@ class EventConcurrentUpdateError(OmniBoxError):
         super().__init__(msg)
 
 
+class TransientError(OmniBoxError):
+    """Raised by a publisher or a handler when the failure is the environment's, not the event's.
+
+    The pipeline records it without spending an attempt and reschedules the
+    event, the way ``handler_retry(count_as_attempt=False)`` does for a
+    returned result. ``KafkaEventPublisher`` raises it once its own retries
+    are spent on a broker that does not answer.
+    """
+
+
 class UnsupportedCapabilityError(OmniBoxError):
     """Raised when a required repository capability is not available."""
 

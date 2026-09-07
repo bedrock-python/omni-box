@@ -8,8 +8,16 @@ from typing import TYPE_CHECKING
 import orjson
 import structlog
 from aiokafka import AIOKafkaProducer
+from aiokafka.errors import (
+    KafkaConnectionError,
+    KafkaTimeoutError,
+    NodeNotReadyError,
+    RequestTimedOutError,
+    UnknownTopicOrPartitionError,
+)
 
 from ....core.converters.event import EventConverter
+from ....core.exceptions import TransientError
 from ....core.models.entities import OutboxEvent
 from ....core.protocols import EventPublisher
 from ....utils.backoff import ErrorClassifier, calculate_backoff_with_jitter
@@ -19,6 +27,32 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# The aiokafka errors that mean the broker is not answering. aiokafka's own
+# ``retriable`` flag is wider than this: it also covers a topic that does not
+# exist, which is about the row and not about the broker.
+_BROKER_UNREACHABLE: tuple[type[BaseException], ...] = (
+    KafkaConnectionError,
+    KafkaTimeoutError,
+    NodeNotReadyError,
+    RequestTimedOutError,
+)
+
+
+def _describe(exc: BaseException) -> str:
+    """``TypeName: message``, without repeating a name the exception already prints.
+
+    aiokafka's errors stringify as ``NodeNotReadyError: node 1 is not ready``
+    on their own, and one of them carrying no message stringifies as the name
+    alone; the builtins print the message only.
+    """
+    name = type(exc).__name__
+    detail = str(exc)
+    if not detail or detail == name:
+        return name
+    if detail.startswith(f"{name}: "):
+        return detail
+    return f"{name}: {detail}"
+
 
 class KafkaEventPublisher(EventPublisher):
     """Kafka publisher that converts OutboxEvent and sends via aiokafka.
@@ -27,6 +61,13 @@ class KafkaEventPublisher(EventPublisher):
         Caller is responsible for ``AIOKafkaProducer`` lifecycle (``start``/``stop``).
         For at-least-once delivery configure the producer with
         ``enable_idempotence=True`` and ``acks="all"``.
+
+        A broker that does not answer -- a connection or node error, a request
+        or client timeout, or a topic it cannot fetch metadata for while it
+        ignores a metadata request as well -- is retried ``max_infra_retries``
+        times and then raised as ``TransientError``, which the outbox pipeline
+        records without spending an attempt. Everything else, a payload or a
+        topic the broker rejects included, is raised as is and counts.
     """
 
     def __init__(
@@ -59,17 +100,30 @@ class KafkaEventPublisher(EventPublisher):
                     headers=encoded_headers,
                 )
             except Exception as e:
-                classification = ErrorClassifier.classify(e)
-                if classification.is_transient and attempt < self._max_infra_retries:
+                reason = await self._unreachable_reason(e, event.topic)
+                if reason is None:
+                    raise
+                if attempt < self._max_infra_retries:
                     delay = calculate_backoff_with_jitter(attempt)
                     logger.warning(
-                        "Kafka retry", event_id=str(event.id), attempt=attempt + 1, delay=delay, error=str(e)
+                        "Kafka retry", event_id=str(event.id), attempt=attempt + 1, delay=delay, error=reason
                     )
                     await asyncio.sleep(delay)
                     continue
-                raise
+                raise TransientError(reason) from e
             else:
                 return
+
+    async def _unreachable_reason(self, exc: Exception, topic: str) -> str | None:
+        """Describe ``exc`` when it means the broker is not answering; ``None`` when it is about the event."""
+        if ErrorClassifier.classify(exc, additional_transient=_BROKER_UNREACHABLE).is_transient:
+            return f"Kafka broker unreachable: {_describe(exc)}"
+        # aiokafka reports a topic it could not fetch metadata for the same way
+        # whether the topic is missing or the broker is silent; a metadata
+        # refresh that fails as well tells the two apart.
+        if isinstance(exc, UnknownTopicOrPartitionError) and not await self._producer.client.force_metadata_update():
+            return f"Kafka broker unreachable: no metadata for topic {topic!r} and no answer to a metadata request"
+        return None
 
     def _build_headers(self, event: OutboxEvent) -> dict[str, str]:
         headers = dict(event.headers or {})

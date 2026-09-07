@@ -25,6 +25,7 @@ from omni_box.core.pipeline.steps import (
     HandlerExecutionStep,
     MetricsStep,
     OpenTelemetryStep,
+    PublisherExecutionStep,
     SiblingDeduplicationStep,
 )
 from omni_box.core.pipeline.strategies.fetch import FilteredFetchStrategy
@@ -206,14 +207,14 @@ def test__create_inbox_processor__handler_step__defaults_to_module_default_timeo
 # -------- create_outbox_processor --------
 
 
-def test__create_outbox_processor__defaults__has_only_handler_step(
+def test__create_outbox_processor__defaults__has_only_publisher_step(
     outbox_repo: MagicMock, publisher: MagicMock
 ) -> None:
     # Arrange / Act
     processor = create_outbox_processor(repo=outbox_repo, publisher=publisher)
 
     # Assert
-    assert [type(s) for s in processor._pipeline._steps] == [HandlerExecutionStep]
+    assert [type(s) for s in processor._pipeline._steps] == [PublisherExecutionStep]
     assert processor._job_name == "outbox_processor"
     assert processor._metrics is None
 
@@ -249,26 +250,26 @@ def test__create_outbox_processor__all_optional_features_enabled__builds_full_pi
         CircuitBreakerStep,
         DLQStep,
         _RecordingStep,
-        HandlerExecutionStep,
+        PublisherExecutionStep,
         _RecordingStep,
         MetricsStep,
     ]
     assert processor._job_name == "custom_outbox"
     assert processor._metrics is outbox_metrics
 
-    handler_step = next(s for s in processor._pipeline._steps if isinstance(s, HandlerExecutionStep))
-    assert handler_step._timeout == 2.5
+    publisher_step = next(s for s in processor._pipeline._steps if isinstance(s, PublisherExecutionStep))
+    assert publisher_step._timeout == 2.5
 
 
-def test__create_outbox_processor__handler_step__defaults_to_module_default_timeout(
+def test__create_outbox_processor__publisher_step__defaults_to_module_default_timeout(
     outbox_repo: MagicMock, publisher: MagicMock
 ) -> None:
     # Arrange / Act
     processor = create_outbox_processor(repo=outbox_repo, publisher=publisher)
 
     # Assert
-    handler_step = next(s for s in processor._pipeline._steps if isinstance(s, HandlerExecutionStep))
-    assert handler_step._timeout == DEFAULT_PUBLISH_TIMEOUT_SECONDS
+    publisher_step = next(s for s in processor._pipeline._steps if isinstance(s, PublisherExecutionStep))
+    assert publisher_step._timeout == DEFAULT_PUBLISH_TIMEOUT_SECONDS
 
 
 # -------- create_dispatching_processor --------

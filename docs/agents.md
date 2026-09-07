@@ -82,7 +82,10 @@ on. Alternatively, land rows fast with no handler and drain them later with
 
 **State** is three values. `pending` → `completed` on success; `pending` → `pending` with
 `attempts_made + 1` on a counted failure; `pending` → `failed` when `attempts_made` reaches
-`max_attempts`. `failed` is terminal — nothing fetches it again.
+`max_attempts`. `failed` is terminal — nothing fetches it again. A **non-counted** failure
+leaves the row `pending` with `attempts_made` where it was: that is what a broker or a
+downstream that is not there produces, and an outage therefore costs no budget however long
+it lasts.
 
 **Locking** is a `(locked_at, locked_by)` pair on the row plus, on PostgreSQL, the row lock
 the fetching transaction holds. Two workers do not collide because of `SKIP LOCKED`; the
@@ -319,7 +322,8 @@ event, `StepResult.stop()` ends the whole batch.
 
 | Step (`omni_box.core.pipeline.steps`) | What it does |
 |---|---|
-| `HandlerExecutionStep(handler, timeout=30.0)` | awaits the handler, turns the outcome into `mark_completed` / `mark_failed` / `mark_skipped` on the context. Every processor needs one |
+| `HandlerExecutionStep(handler, timeout=30.0)` | awaits the handler, turns the outcome into `mark_completed` / `mark_failed` / `mark_skipped` on the context. Every processor needs one. A `TransientError` out of the handler is recorded without spending an attempt; a timeout counts |
+| `PublisherExecutionStep(publish, timeout=30.0)` | the outbox's handler step, installed by `create_outbox_processor`. A `TransientError` **or a timeout** is recorded without spending an attempt, and it ends this cycle's publishing: the rest of the batch is recorded the same way, unpublished and unrescheduled, so one dead broker costs one probe per cycle |
 | `SiblingDeduplicationStep(enabled=True)` | skips the event when a *completed* row shares its `(message_id, consumer_group)`. Inbox only |
 | `MetricsStep(metrics)` | emits counters and durations at `on_batch_end` |
 | `OpenTelemetryStep(service_name="omni-box")` | one span per event; needs the `opentelemetry` extra, silently inert without it |
@@ -377,7 +381,12 @@ with `isinstance(repo, PostgresInboxRepository)` where a type checker needs to s
 ### Kafka (`omni_box.infra.brokers.kafka`, extra `kafka`)
 
 `KafkaEventPublisher(producer, converter, *, max_infra_retries=3)` — you own the
-`AIOKafkaProducer` lifecycle; set `enable_idempotence=True` and `acks="all"` on it.
+`AIOKafkaProducer` lifecycle; set `enable_idempotence=True` and `acks="all"` on it. A broker
+that does not answer — a connection or node error, a request or client timeout, or a topic it
+cannot fetch metadata for while it ignores a metadata request as well — is retried
+`max_infra_retries` times and then raised as `TransientError`, which costs the row no
+attempt. Everything else, a record the broker rejects or a topic it says it does not have
+included, is raised as it is and counts.
 `KafkaEventConsumer(consumer, *, payload_loader=None, message_id_getter=None,
 event_type_getter=None, source_getter=None, envelope_parser=None)` — you own the
 `AIOKafkaConsumer` and should set `enable_auto_commit=False`. Without a
@@ -457,11 +466,17 @@ protocols, not a third implementation. `EventBatchProcessor` sets
     repositories therefore serialize the identity with `pg_advisory_xact_lock` and look it up
     before inserting: one advisory lock and one `SELECT` per insert, held until *your*
     transaction ends. One more reason to keep those transactions short.
-13. **Nothing classifies errors for you.** `ErrorClassifier` exists in `omni_box.utils` and
-    is used only inside `KafkaEventPublisher`'s own infrastructure retry. In the pipeline,
-    every exception out of a handler or a publisher is a counted failure. To spend no budget
-    on a transient error, return `handler_retry(msg, count_as_attempt=False,
-    next_retry_at=…)` — and `next_retry_at` is mandatory when `count_as_attempt=False`.
+13. **Nothing classifies errors for you; you say so, by raising or returning.** In the
+    pipeline every exception out of a handler or a publisher is a counted failure, with one
+    named exception: `TransientError`, which says the failure belongs to the environment and
+    not to the event. It is recorded without spending an attempt and the row comes back a
+    second later. Raise it from your handler or your broker adapter when the thing you were
+    talking to is not there; `KafkaEventPublisher` raises it once `max_infra_retries` are
+    spent on a broker that does not answer. The equivalent for a handler that returns rather
+    than raises is `handler_retry(msg, count_as_attempt=False, next_retry_at=…)` — and
+    `next_retry_at` is mandatory when `count_as_attempt=False`. `ErrorClassifier` still
+    classifies nothing on your behalf: it lives in `omni_box.utils` and is used only inside
+    `KafkaEventPublisher`'s own infrastructure retry.
 14. **`scheduled_at` is validated against `created_at`**: no more than 60 seconds before it,
     no more than 365 days after. A retry scheduled beyond that is rejected, not clamped.
 15. **`release_stale_locks(stale_timeout_seconds)` must use a timeout comfortably larger
@@ -579,6 +594,7 @@ Everything derives from `OmniBoxError`.
 | `EventAlreadyLockedError` | locking an event that is already locked |
 | `InvalidEventStateError` | a transition from a status that does not allow it — carries `current_status` and `expected_statuses` |
 | `EventConcurrentUpdateError` | an update touched fewer rows than expected: another worker got there first, or the row is gone. Carries `expected`, `actual`, `missing_ids` |
+| `TransientError` | the failure is the environment's, not the event's. Raised by a publisher or a handler; recorded without spending an attempt and retried next cycle |
 | `UnsupportedCapabilityError` | a maintenance call on a repository without `SupportsRetentionPolicies` |
 | `InboxPersistError` | the per-message inbox transaction rolled back; the offset was deliberately not committed. The underlying failure is on `.cause` |
 

@@ -17,6 +17,7 @@ from ..core.pipeline.steps import (
     HandlerExecutionStep,
     MetricsStep,
     OpenTelemetryStep,
+    PublisherExecutionStep,
     SiblingDeduplicationStep,
 )
 from ..core.pipeline.strategies.fetch import FilteredFetchStrategy
@@ -127,7 +128,7 @@ def create_outbox_processor(
         for step in additional_steps_before:
             builder.add_step(step)
 
-    builder.add_step(HandlerExecutionStep(publisher.publish, timeout=publish_timeout))
+    builder.add_step(PublisherExecutionStep(publisher.publish, timeout=publish_timeout))
 
     if additional_steps_after:
         for step in additional_steps_after:

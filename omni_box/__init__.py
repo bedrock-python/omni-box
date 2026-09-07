@@ -34,6 +34,7 @@ from .core import (
     StorageIntegrityError,
     StorageTimeoutError,
     StorageTransactionError,
+    TransientError,
     UnsupportedCapabilityError,
 )
 from .core.converters import EnvelopeEventConverter
@@ -116,6 +117,7 @@ __all__ = [
     "StorageIntegrityError",
     "StorageTimeoutError",
     "StorageTransactionError",
+    "TransientError",
     "UnsupportedCapabilityError",
     "__version__",
     "create_dispatching_processor",

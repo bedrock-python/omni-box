@@ -12,6 +12,7 @@ from .exceptions import (
     StorageIntegrityError,
     StorageTimeoutError,
     StorageTransactionError,
+    TransientError,
     UnsupportedCapabilityError,
 )
 from .models.entities import BaseEvent, InboxEvent, OutboxEvent
@@ -42,5 +43,6 @@ __all__ = [
     "StorageIntegrityError",
     "StorageTimeoutError",
     "StorageTransactionError",
+    "TransientError",
     "UnsupportedCapabilityError",
 ]

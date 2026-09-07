@@ -12,6 +12,8 @@ from omni_box.core.exceptions import (
     EventLockedByAnotherWorkerError,
     EventNotLockedError,
     InvalidEventStateError,
+    OmniBoxError,
+    TransientError,
     UnsupportedCapabilityError,
 )
 
@@ -126,3 +128,12 @@ def test__unsupported_capability_error__created__includes_repo_and_capability_in
     assert exc.capability == "BulkOps"
     assert exc.repo_type == "MyRepo"
     assert "MyRepo does not support BulkOps" in str(exc)
+
+
+def test__transient_error__raised__is_an_omni_box_error_carrying_the_message() -> None:
+    # Arrange / Act
+    exc = TransientError("Kafka broker unreachable: NodeNotReadyError")
+
+    # Assert
+    assert isinstance(exc, OmniBoxError)
+    assert str(exc) == "Kafka broker unreachable: NodeNotReadyError"

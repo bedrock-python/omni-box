@@ -6,10 +6,12 @@ import asyncio
 
 import pytest
 
+from omni_box.core.exceptions import TransientError
 from omni_box.core.models.entities import OutboxEvent
 from omni_box.core.pipeline.context import ProcessingContext
 from omni_box.core.pipeline.steps.handler import HandlerExecutionStep
 from omni_box.core.services.results import EventHandlerResult, EventHandlerStatus
+from omni_box.utils import utc_now
 from tests.helpers import create_fake_event
 
 pytestmark = pytest.mark.unit
@@ -179,3 +181,27 @@ async def test__handler_step__handler_raises_unexpected__marks_failed_with_exc_t
     assert failure.event_id == event.id
     assert "ValueError" in failure.error
     assert "kaboom" in failure.error
+
+
+async def test__handler_step__handler_raises_transient_error__marks_failed_noncounted_and_reschedules(
+    context: ProcessingContext[OutboxEvent],
+) -> None:
+    # Arrange
+    async def handler(event: OutboxEvent, repo: object) -> None:
+        raise TransientError("payment gateway unreachable")
+
+    step: HandlerExecutionStep[OutboxEvent] = HandlerExecutionStep(handler)
+    event = create_fake_event()
+    before = utc_now()
+
+    # Act
+    await step.execute(event, context)
+
+    # Assert
+    assert context.failed_counted == []
+    failure = context.failed_noncounted[0]
+    assert failure.event_id == event.id
+    assert failure.error == "payment gateway unreachable"
+    assert failure.next_retry_at is not None
+    assert failure.next_retry_at > before
+    assert context.statuses[event.id] == EventHandlerStatus.RETRY

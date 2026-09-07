@@ -12,6 +12,7 @@ import pytest
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from omni_box.core.converters.event import EnvelopeEventConverter, RawEventConverter, SchemaVersionedConverter
+from omni_box.core.exceptions import TransientError
 from omni_box.core.models.entities import OutboxEvent
 from omni_box.infra.brokers.kafka.publisher import KafkaEventPublisher
 from tests.helpers import FakeOutboxStore
@@ -178,7 +179,7 @@ async def test__kafka_publisher__transient_error_under_limit__retries_and_succee
     assert len(sleeps) == 2
 
 
-async def test__kafka_publisher__transient_error_over_limit__raises_original_exception(
+async def test__kafka_publisher__transient_error_over_limit__raises_transient_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
@@ -186,13 +187,15 @@ async def test__kafka_publisher__transient_error_over_limit__raises_original_exc
         return
 
     monkeypatch.setattr("omni_box.infra.brokers.kafka.publisher.asyncio.sleep", _no_sleep)
-    broken = _BrokenProducer(fail_times=10, exc=ConnectionError("permanent transient"))
+    original = ConnectionError("permanent transient")
+    broken = _BrokenProducer(fail_times=10, exc=original)
     publisher = KafkaEventPublisher(cast(AIOKafkaProducer, broken), RawEventConverter(), max_infra_retries=1)
 
     # Act / Assert
-    with pytest.raises(ConnectionError):
+    with pytest.raises(TransientError, match="Kafka broker unreachable: ConnectionError") as exc_info:
         await publisher.publish(_make_event(topic="any"), repo=cast("FakeOutboxStore", FakeOutboxStore()))
     assert broken.calls == 2  # initial + 1 retry
+    assert exc_info.value.__cause__ is original
 
 
 async def test__kafka_publisher__permanent_error__no_retry_and_raises(

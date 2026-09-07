@@ -7,8 +7,17 @@ from uuid import uuid4
 
 import orjson
 import pytest
+from aiokafka.errors import (
+    KafkaConnectionError,
+    KafkaTimeoutError,
+    MessageSizeTooLargeError,
+    NodeNotReadyError,
+    RequestTimedOutError,
+    UnknownTopicOrPartitionError,
+)
 
 from omni_box.core.converters.event import EventConverter
+from omni_box.core.exceptions import TransientError
 from omni_box.core.models.entities import OutboxEvent
 from omni_box.infra.brokers.kafka.publisher import KafkaEventPublisher
 
@@ -129,7 +138,7 @@ class TestKafkaEventPublisherPublish:
         assert producer.send_and_wait.call_count == 3
 
     @pytest.mark.asyncio
-    async def test__publish__transient_error_exceeds_max_retries__raises(self) -> None:
+    async def test__publish__transient_error_exceeds_max_retries__raises_transient_error(self) -> None:
         # Arrange
         event = _make_event()
         producer = AsyncMock()
@@ -143,11 +152,125 @@ class TestKafkaEventPublisherPublish:
 
         with patch("omni_box.infra.brokers.kafka.publisher.asyncio.sleep", new_callable=AsyncMock):
             # Act / Assert
-            with pytest.raises(ConnectionError):
+            with pytest.raises(TransientError, match="Kafka broker unreachable: ConnectionError: conn") as exc_info:
                 await pub.publish(event, repo)
 
         # 3 attempts total (attempt 0, 1, 2) — on attempt==max_infra_retries it raises
         assert producer.send_and_wait.call_count == 3
+        assert isinstance(exc_info.value.__cause__, ConnectionError)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            KafkaConnectionError("Unable to bootstrap from [('kafka', 9092)]"),
+            KafkaTimeoutError(),
+            NodeNotReadyError("node 1 is not ready"),
+            RequestTimedOutError(),
+        ],
+        ids=["KafkaConnectionError", "KafkaTimeoutError", "NodeNotReadyError", "RequestTimedOutError"],
+    )
+    async def test__publish__broker_does_not_answer__retries_then_raises_transient_error(self, exc: Exception) -> None:
+        # Arrange
+        event = _make_event()
+        producer = AsyncMock()
+        converter = MagicMock(spec=EventConverter)
+        converter.convert.return_value = {"k": "v"}
+        pub = KafkaEventPublisher(producer, converter, max_infra_retries=1)
+        repo = MagicMock()
+        producer.send_and_wait.side_effect = exc
+
+        with patch("omni_box.infra.brokers.kafka.publisher.asyncio.sleep", new_callable=AsyncMock):
+            # Act / Assert
+            with pytest.raises(TransientError, match="Kafka broker unreachable") as exc_info:
+                await pub.publish(event, repo)
+
+        # Assert
+        assert producer.send_and_wait.call_count == 2  # initial + 1 retry
+        assert exc_info.value.__cause__ is exc
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("exc", "expected"),
+        [
+            (NodeNotReadyError("node 1 is not ready"), "NodeNotReadyError: node 1 is not ready"),
+            (KafkaTimeoutError(), "KafkaTimeoutError"),
+            (ConnectionError("connection refused"), "ConnectionError: connection refused"),
+        ],
+        ids=["aiokafka error with a message", "aiokafka error without one", "builtin"],
+    )
+    async def test__publish__broker_does_not_answer__names_the_error_once_in_the_reason(
+        self, exc: Exception, expected: str
+    ) -> None:
+        # Arrange
+        event = _make_event()
+        producer = AsyncMock()
+        converter = MagicMock(spec=EventConverter)
+        converter.convert.return_value = {"k": "v"}
+        pub = KafkaEventPublisher(producer, converter, max_infra_retries=0)
+        repo = MagicMock()
+        producer.send_and_wait.side_effect = exc
+
+        # Act / Assert
+        with pytest.raises(TransientError) as exc_info:
+            await pub.publish(event, repo)
+
+        # ``last_error`` is read by an operator: aiokafka's own str() already
+        # carries the class name, and repeating it would be noise.
+        assert str(exc_info.value) == f"Kafka broker unreachable: {expected}"
+
+    @pytest.mark.asyncio
+    async def test__publish__unknown_topic_and_no_answer_to_metadata__raises_transient_error(self) -> None:
+        # Arrange
+        event = _make_event(topic="orders.events")
+        producer = AsyncMock()
+        producer.client.force_metadata_update = AsyncMock(return_value=False)
+        converter = MagicMock(spec=EventConverter)
+        converter.convert.return_value = {"k": "v"}
+        pub = KafkaEventPublisher(producer, converter, max_infra_retries=0)
+        repo = MagicMock()
+        producer.send_and_wait.side_effect = UnknownTopicOrPartitionError()
+
+        # Act / Assert
+        with pytest.raises(TransientError, match=r"no metadata for topic 'orders\.events'"):
+            await pub.publish(event, repo)
+
+        producer.client.force_metadata_update.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test__publish__unknown_topic_on_a_broker_that_answers__raises_as_is_without_retry(self) -> None:
+        # Arrange
+        event = _make_event(topic="no.such.topic")
+        producer = AsyncMock()
+        producer.client.force_metadata_update = AsyncMock(return_value=True)
+        converter = MagicMock(spec=EventConverter)
+        converter.convert.return_value = {"k": "v"}
+        pub = KafkaEventPublisher(producer, converter, max_infra_retries=3)
+        repo = MagicMock()
+        producer.send_and_wait.side_effect = UnknownTopicOrPartitionError()
+
+        # Act / Assert
+        with pytest.raises(UnknownTopicOrPartitionError):
+            await pub.publish(event, repo)
+
+        assert producer.send_and_wait.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test__publish__broker_rejects_the_record__raises_as_is_without_retry(self) -> None:
+        # Arrange
+        event = _make_event()
+        producer = AsyncMock()
+        converter = MagicMock(spec=EventConverter)
+        converter.convert.return_value = {"k": "v"}
+        pub = KafkaEventPublisher(producer, converter, max_infra_retries=3)
+        repo = MagicMock()
+        producer.send_and_wait.side_effect = MessageSizeTooLargeError()
+
+        # Act / Assert
+        with pytest.raises(MessageSizeTooLargeError):
+            await pub.publish(event, repo)
+
+        assert producer.send_and_wait.call_count == 1
 
     @pytest.mark.asyncio
     async def test__publish__non_transient_error__raises_immediately(self) -> None:

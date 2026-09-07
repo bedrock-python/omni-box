@@ -29,7 +29,7 @@ Pure Python, framework-agnostic.
 - Pipeline primitives (`omni_box.core.pipeline`):
   - `EventProcessorBuilder` — fluent builder for `EventBatchProcessor`.
   - `ProcessingPipeline`, `ProcessingContext`, `ProcessingStep`, `StepResult`.
-  - Built-in steps: `HandlerExecutionStep`, `SiblingDeduplicationStep`, `MetricsStep`, `OpenTelemetryStep`, `CircuitBreakerStep`, `DLQStep`.
+  - Built-in steps: `HandlerExecutionStep`, `PublisherExecutionStep`, `SiblingDeduplicationStep`, `MetricsStep`, `OpenTelemetryStep`, `CircuitBreakerStep`, `DLQStep`.
   - Strategies:
     - Fetch: `DistributedLockingFetchStrategy`, `OptimisticLockingFetchStrategy`, `FilteredFetchStrategy`.
     - Commit: `BulkCommitStrategy`, `SingleCommitStrategy`.
