@@ -85,6 +85,18 @@ while not shutdown:
 Drop the transaction and the cycle publishes for nothing: the lock and the completion roll
 back with the session, the rows are still `pending`, and the next cycle sends them again.
 
+**When the broker is down.** A publish failure that is about the broker rather than about the
+row — the connection, the node, a request that timed out, the publish timeout itself — does
+not spend the row's attempt budget. `KafkaEventPublisher` raises `TransientError` once its
+own `max_infra_retries` are spent, and the outbox step records the row with
+`attempts_made` untouched and stops publishing for the rest of the cycle: the remaining rows
+are recorded the same way without being sent, since they were going to the same broker. So an
+outage costs one probe per cycle, the rows stay `pending` however long it lasts, and the first
+cycle after the broker answers publishes the backlog. A payload the broker rejects, or a topic
+it says it does not have, is about the row and still spends an attempt — that is what
+`max_attempts` and `failed` are for. Raise `TransientError` from your own publisher or handler
+to get the same treatment.
+
 ## Transactional Inbox
 
 ### Option A — drive consumption with `InboxConsumerRunner`
@@ -229,6 +241,7 @@ from omni_box.core.pipeline.steps import (
     DLQStep,
     HandlerExecutionStep,
     OpenTelemetryStep,
+    PublisherExecutionStep,
     SiblingDeduplicationStep,
 )
 from omni_box.core.pipeline.strategies import (
@@ -251,6 +264,10 @@ processor = builder.build()
 ```
 
 The builder auto-picks `DistributedLockingFetchStrategy` + `BulkCommitStrategy` when the repository advertises matching capabilities, so the `with_*` calls above are usually optional.
+
+For an outbox, use `PublisherExecutionStep(broker.publish, timeout=30)` in place of
+`HandlerExecutionStep` — it is what `create_outbox_processor` installs, and it is the step
+that keeps a broker outage off the attempt budget.
 
 ## Outbox payload envelopes
 

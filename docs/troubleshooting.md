@@ -54,7 +54,21 @@ Inbox rows are deduplicated by **`(message_id, consumer_group)`** (the unique in
 
 The `DLQStep` only considers counted failures: a transient error never routes a row to DLQ even if it superficially looks like it crossed the threshold. The DLQ move itself is **best-effort** — it runs outside the commit transaction and a failure during `move_to_dlq` is logged and swallowed. Pair the step with an idempotent sink (e.g. Kafka with a unique key) to avoid duplicates on replay.
 
-Inspect failed rows directly:
+### The attempt budget is for the row, not for the outage
+
+An attempt is spent when the failure is about the event: a payload the broker rejects, a topic it does not have, a serialization error. A broker or a downstream that is **not there** is a property of the cycle, and spending the budget on it would turn a long outage into a backlog of terminal `failed` rows that only an operator could bring back.
+
+So a publisher or a handler says so by raising `TransientError`. The pipeline records it without bumping `attempts_made` and reschedules the row a second ahead; `KafkaEventPublisher` raises it once `max_infra_retries` are spent on a broker that does not answer. What you see during an outage is rows sitting in `pending` with `attempts_made` unchanged and `last_error` saying the broker is unreachable — and, because the outbox step stops publishing for the rest of the cycle after the first such failure, one probe per cycle rather than one per row:
+
+```sql
+SELECT status, attempts_made, count(*), max(last_error)
+FROM outbox_events
+GROUP BY 1, 2 ORDER BY 1, 2;
+```
+
+When the broker answers again the next cycle publishes the backlog. `requeue_failed` stays what it always was: the operator's tool for rows that genuinely poisoned themselves, not the way out of an outage.
+
+Inspect genuinely failed rows directly:
 
 ```sql
 SELECT id, event_type, attempts_made, max_attempts, last_error

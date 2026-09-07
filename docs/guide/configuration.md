@@ -24,7 +24,7 @@ OutboxPublisher(
 )
 ```
 
-- `publish_timeout` — hard timeout for a single `broker.publish` call.
+- `publish_timeout` — hard timeout for a single `broker.publish` call. It is treated as the broker's problem, not the row's: it costs no attempt and ends the cycle's publishing. Keep an eye on how it compares with the adapter's own patience — `AIOKafkaProducer(request_timeout_ms=...)` defaults to 40 s against this timeout's 30 s, so with the defaults the step gives up before aiokafka has said anything, and the log shows a publish timeout where a broker error would be more informative. Set `request_timeout_ms` below `publish_timeout`, or raise `publish_timeout` above it.
 - `concurrency_limit` — wraps `publish_batch` in an `asyncio.Semaphore`.
 
 ## `InboxConsumerRunner`

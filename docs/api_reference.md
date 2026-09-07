@@ -77,7 +77,8 @@ Fluent builder. Picks `DistributedLockingFetchStrategy` + `BulkCommitStrategy` a
 
 | Step | Purpose | Notes |
 | :--- | :--- | :--- |
-| `HandlerExecutionStep` | Runs the user handler inside the pipeline with a timeout. | Required terminal step in every processor. |
+| `HandlerExecutionStep` | Runs the user handler inside the pipeline with a timeout. | Required terminal step in every processor. A `TransientError` out of the handler is recorded with `count_as_attempt=False` and rescheduled; a timeout counts. |
+| `PublisherExecutionStep` | The outbox's handler step; installed by `create_outbox_processor`. | Subclasses `HandlerExecutionStep`. The publish timeout is transient too, and the first transient failure ends the batch's publishing — the remaining events are recorded the same way, unpublished, with their schedule untouched. |
 | `SiblingDeduplicationStep` | Skips an `InboxEvent` if a sibling row with the same `(message_id, consumer_group)` is already `completed`. | Calls `InboxEventRepository.has_completed_sibling_for_inbox_key`. A no-op on a non-partitioned table — see [storage adapters](storage_adapters.md#inboxeventrepository). |
 | `MetricsStep` | Pushes batch lifecycle counters into an `InboxMetrics` / `OutboxMetrics` sink. | |
 | `OpenTelemetryStep(service_name=...)` | Creates spans for each batch/event. | Requires `opentelemetry` extra. |
@@ -185,6 +186,7 @@ All inherit from `OmniBoxError`.
 
 - Storage: `StorageError`, `StorageConnectionError`, `StorageTimeoutError`, `StorageTransactionError`, `StorageIntegrityError`.
 - Domain / locking: `EventNotLockedError`, `EventLockedByAnotherWorkerError`, `EventAlreadyLockedError`, `InvalidEventStateError`, `EventConcurrentUpdateError`.
+- Transient: `TransientError` — raised by a publisher or a handler to say the failure belongs to the environment and not to the event. The pipeline records it without spending an attempt and retries the row on the next cycle.
 - Misc: `UnsupportedCapabilityError`, `InboxPersistError`.
 
 ## Infrastructure adapters
@@ -201,7 +203,7 @@ All inherit from `OmniBoxError`.
 
 `omni_box.infra.brokers.kafka`:
 
-- `KafkaEventPublisher(producer, converter, *, max_infra_retries=3)` — built on top of `aiokafka.AIOKafkaProducer`. The caller owns the producer lifecycle (`start`/`stop`).
+- `KafkaEventPublisher(producer, converter, *, max_infra_retries=3)` — built on top of `aiokafka.AIOKafkaProducer`. The caller owns the producer lifecycle (`start`/`stop`). A broker that does not answer — connection and node errors, request and client timeouts, and an unknown topic the broker will not confirm with a metadata refresh either — is retried `max_infra_retries` times and then raised as `TransientError`, which costs the row no attempt. Anything else, including a record the broker rejects, is raised as it is and counts.
 - `KafkaEventConsumer` — wraps `aiokafka.AIOKafkaConsumer` and exposes per-record `AckHandle`s. Use `DefaultEnvelopeParser` or provide your own `EnvelopeParser`.
 
 Neither adapter depends on any external "kit" package; only `aiokafka` is required.

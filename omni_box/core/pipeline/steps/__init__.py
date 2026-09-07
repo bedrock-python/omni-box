@@ -6,6 +6,7 @@ from .dlq import DLQStep, DLQStorage
 from .handler import HandlerExecutionStep
 from .metrics import MetricsStep
 from .otel import OpenTelemetryStep
+from .publisher import PublisherExecutionStep
 
 __all__ = [
     "CircuitBreakerStep",
@@ -14,5 +15,6 @@ __all__ = [
     "HandlerExecutionStep",
     "MetricsStep",
     "OpenTelemetryStep",
+    "PublisherExecutionStep",
     "SiblingDeduplicationStep",
 ]
