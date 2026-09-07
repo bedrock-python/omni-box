@@ -98,13 +98,13 @@ Forget that transaction and nothing happened: the lock and the completion roll b
 
 ## Inbox Quick Start
 
-`InboxConsumerRunner` consumes from a broker and lands every message in the inbox table inside a transaction. The transaction is opened via a user-supplied `InboxTransactionProviderProtocol`, which yields an `InboxEventRepository` bound to the open session — this keeps the library free of any UoW.
+`InboxConsumerRunner` consumes from a broker and lands every message in the inbox table inside a transaction. The transaction is opened via a user-supplied `InboxTransactionProviderProtocol`, which yields an `InboxEventRepository` bound to the open session — this keeps the library free of any UoW. The handler runs inside that transaction, and `repo.session` is how it writes its own side effects there.
 
 ```python
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-from omni_box import AckStrategy, InboxConsumerRunner
+from omni_box import AckStrategy, InboxConsumerRunner, InboxEvent
 from omni_box.core.protocols import InboxEventRepository
 from omni_box.core.protocols.transaction import InboxTransactionProviderProtocol
 
@@ -122,10 +122,16 @@ class InboxTxProvider(InboxTransactionProviderProtocol):
             yield self._repo_factory(session)
 
 
+async def handle_inbox_event(event: InboxEvent, repo: InboxEventRepository) -> None:
+    await repo.session.execute(               # the transaction the inbox row is in
+        invoices.insert().values(order_id=event.payload["order_id"])
+    )
+
+
 runner = InboxConsumerRunner(
     consumer=kafka_inbox_consumer,            # your EventConsumer adapter
     transaction_provider=InboxTxProvider(...),
-    handler=handle_inbox_event,               # optional: process within the same tx
+    handler=handle_inbox_event,               # optional; runs inside the same tx
     worker_id="worker-1",
     consumer_group="identity-service",
     ack_strategy=AckStrategy.EXACTLY_ONCE_INBOX,

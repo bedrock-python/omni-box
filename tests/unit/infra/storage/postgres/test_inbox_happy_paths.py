@@ -91,6 +91,22 @@ def _make_partitioned_repo(session: AsyncSession) -> PostgresInboxRepository:
 
 
 # ---------------------------------------------------------------------------
+# session
+# ---------------------------------------------------------------------------
+
+
+def test__session__property__returns_the_session_the_repository_was_built_on() -> None:
+    # Arrange
+    session = _make_session_returning()
+
+    # Act
+    repo = _make_non_partitioned_repo(session)
+
+    # Assert
+    assert repo.session is session
+
+
+# ---------------------------------------------------------------------------
 # create — non-partitioned path (delegates to super().create)
 # ---------------------------------------------------------------------------
 

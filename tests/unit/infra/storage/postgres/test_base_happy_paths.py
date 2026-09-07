@@ -87,6 +87,31 @@ def _make_repo(session: AsyncSession) -> PostgresOutboxRepository:
 
 
 # ---------------------------------------------------------------------------
+# session
+# ---------------------------------------------------------------------------
+
+
+def test__session__property__returns_the_session_the_repository_was_built_on() -> None:
+    # Arrange
+    session = _make_session_returning()
+
+    # Act
+    repo = PostgresOutboxRepository(session=session, model_class=ConcreteOutboxEvent)
+
+    # Assert
+    assert repo.session is session
+
+
+def test__session__assignment__raises_attribute_error() -> None:
+    # Arrange
+    repo = PostgresOutboxRepository(session=_make_session_returning(), model_class=ConcreteOutboxEvent)
+
+    # Act / Assert
+    with pytest.raises(AttributeError):
+        repo.session = _make_session_returning()  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
 

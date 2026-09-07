@@ -84,6 +84,9 @@ A consecutive success resets the breaker.
 - **Symptom**: Kafka offsets do not advance even though rows are written.
   Likely cause: `EXACTLY_ONCE_INBOX` + a failing handler. The runner only commits after success unless `exactly_once_commit_on_failed=True`. Decide whether the failure is recoverable and pick the appropriate flag.
 
+- **Symptom**: the handler's side effect is in the database but the inbox row is not — or the effect appears twice after a redelivery.
+  Likely cause: the handler opened a session of its own. Write through `repo.session`, the transaction the inbox row is in; the two then commit together, or roll back together when the handler raises.
+
 - **`InboxPersistError` thrown by `process_one`**.
   Indicates the per-message transaction was rolled back (DB outage, integrity violation, lock conflict). The offset is intentionally not committed so the broker can redeliver. Check the cause via `error.cause`.
 
