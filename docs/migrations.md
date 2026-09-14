@@ -225,6 +225,8 @@ ALTER TABLE outbox_events RENAME CONSTRAINT outbox_events_ck_outbox_events_compl
     TO outbox_events_completed_status_consistency_check;
 ```
 
+The four bases also build `__table_args__` in a `declared_attr` now, so a workaround that read the tuple off the abstract class — `OutboxEventPartitionedDBBase.__table_args__`, to wrap the names in `conv()` by hand — raises `AttributeError: type object 'OutboxEventPartitionedDBBase' has no attribute 'metadata'` at import. Delete it; the bases produce the convention's names on their own.
+
 ## Alembic example
 
 ```python
