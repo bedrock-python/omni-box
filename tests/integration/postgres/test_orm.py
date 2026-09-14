@@ -1,10 +1,29 @@
 import pytest
-from sqlalchemy import String, Table
+from sqlalchemy import Connection, MetaData, String, Table, inspect, text
+from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.orm import DeclarativeBase
 
 from omni_box.core.models.enums import EventStatus
+from omni_box.infra.storage.postgres.orm import (
+    InboxEventDBBase,
+    InboxEventPartitionedDBBase,
+    OutboxEventDBBase,
+    OutboxEventPartitionedDBBase,
+)
 from tests.models import ConcreteOutboxEvent
 
 pytestmark = pytest.mark.integration
+
+CHECK_RULES = ("attempts_valid", "completed_status_consistency", "lock_consistency")
+
+# sqlalchemy-foundation-kit's DB_NAMING_CONVENTION
+FOUNDATION_KIT_CONVENTION = {
+    "ix": "%(column_0_label)s_idx",
+    "uq": "%(table_name)s_%(column_0_name)s_key",
+    "ck": "%(table_name)s_%(constraint_name)s_check",
+    "fk": "%(table_name)s_%(column_0_name)s_fkey",
+    "pk": "%(table_name)s_pkey",
+}
 
 
 def test__outbox_event_db_model__concrete_model__has_expected_columns_and_defaults() -> None:
@@ -92,3 +111,45 @@ def test__outbox_event_db_model__concrete_model__has_expected_indexes() -> None:
     assert "scheduled_at" in [c.name for c in pending_fetch_idx.columns]
     assert pending_fetch_idx.dialect_options["postgresql"]["where"] is not None
     assert EventStatus.PENDING.value in str(pending_fetch_idx.dialect_options["postgresql"]["where"])
+
+
+async def test__event_bases__foundation_kit_convention__postgres_stores_the_qualified_names(
+    db_engine: AsyncEngine,
+) -> None:
+    # Arrange
+    schema = "naming_convention"
+
+    class Base(DeclarativeBase):
+        metadata = MetaData(naming_convention=FOUNDATION_KIT_CONVENTION, schema=schema)
+
+    class Outbox(Base, OutboxEventDBBase):
+        pass
+
+    class Inbox(Base, InboxEventDBBase):
+        pass
+
+    class OutboxPartitioned(Base, OutboxEventPartitionedDBBase):
+        pass
+
+    class InboxPartitioned(Base, InboxEventPartitionedDBBase):
+        pass
+
+    def reflect_check_names(conn: Connection) -> dict[str, set[str]]:
+        inspector = inspect(conn)
+        return {
+            table.name: {c["name"] for c in inspector.get_check_constraints(table.name, schema=schema)}
+            for table in Base.metadata.sorted_tables
+        }
+
+    # Act
+    async with db_engine.begin() as conn:
+        await conn.execute(text(f"CREATE SCHEMA {schema}"))
+        try:
+            await conn.run_sync(Base.metadata.create_all)
+            stored = await conn.run_sync(reflect_check_names)
+        finally:
+            await conn.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+
+    # Assert
+    for table in Base.metadata.sorted_tables:
+        assert stored[table.name] == {f"{table.name}_{rule}_check" for rule in CHECK_RULES}

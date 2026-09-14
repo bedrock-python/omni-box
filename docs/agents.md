@@ -366,7 +366,7 @@ handler it installs, for when you assemble the pipeline yourself.
 Abstract ORM bases — bind them to your own `DeclarativeBase`: `OutboxEventDBBase`,
 `InboxEventDBBase`, `OutboxEventPartitionedDBBase`, `InboxEventPartitionedDBBase`, the
 mixin `EventMixin`, and the helpers `get_event_constraints(table_name,
-include_created_at_in_unique=False)` and `UnConstrainedEnum`.
+include_created_at_in_unique=False, *, metadata=None)` and `UnConstrainedEnum`.
 
 `PostgresOutboxRepository(session, *, model_class, conflict_index_id=None,
 conflict_index_idempotency=None, batch_size=1000, error_max_length=2000,
@@ -488,7 +488,11 @@ protocols, not a third implementation. `EventBatchProcessor` sets
     Give the sink an idempotent key.
 17. **The tables are yours.** No `Base`, no migrations, no DDL. Bind the abstract bases to
     your `DeclarativeBase` and generate the migration yourself; the repositories depend on the
-    column names, so keep them.
+    column names, so keep them. The check constraints are named `ck_<table>_<rule>` unless
+    your `MetaData` has a `ck` naming convention with `%(constraint_name)s` in it — then the
+    bases hand it the bare rule (`attempts_valid`, …) and the convention names them, so nothing
+    runs past PostgreSQL's 63 bytes. Composing `__table_args__` yourself, pass
+    `metadata=Base.metadata` to `get_event_constraints` for the same.
 18. **`shutdown_requested_func` stops a batch, it does not abort an event.** It is polled
     before the fetch — returning `True` there locks nothing at all — and again before each
     event. What was already processed is committed; the events left untouched come back in

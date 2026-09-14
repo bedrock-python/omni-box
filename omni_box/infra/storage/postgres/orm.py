@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 from functools import partial
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -11,11 +12,12 @@ from sqlalchemy import (
     DateTime,
     Enum,
     Index,
+    MetaData,
     String,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 from sqlalchemy.sql import func
 
 from ....core.constants import DEFAULT_MAX_ATTEMPTS
@@ -35,6 +37,10 @@ class EventMixin:
     """Mixin for common transactional event database columns."""
 
     __abstract__ = True
+
+    # Supplied by the DeclarativeBase a concrete model is bound to; declared so that
+    # __table_args__ can read its naming convention.
+    metadata: ClassVar[MetaData]
 
     # Identifiers
     id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -100,25 +106,45 @@ class InboxColumnsMixin:
     source: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
-def get_event_constraints(table_name: str, include_created_at_in_unique: bool = False) -> tuple:
-    """Generate generic constraints and indexes for event table."""
+def get_event_constraints(
+    table_name: str, include_created_at_in_unique: bool = False, *, metadata: MetaData | None = None
+) -> tuple:
+    """Generate generic constraints and indexes for event table.
+
+    Args:
+        table_name: Prefix of the constraint and index names.
+        include_created_at_in_unique: Add ``created_at`` to the unique index on ``idempotency_key``
+            (a partitioned table requires the partition key in every unique index).
+        metadata: The ``MetaData`` the table is registered in. When its ``ck`` naming convention
+            contains ``%(constraint_name)s`` the check constraints are named by their rule alone
+            (``attempts_valid``, ``completed_status_consistency``, ``lock_consistency``) and the
+            convention qualifies them; otherwise they are named ``ck_<table_name>_<rule>``.
+    """
     idempotency_key_cols = ["idempotency_key"]
     if include_created_at_in_unique:
         idempotency_key_cols.append("created_at")
 
+    # SQLAlchemy applies a convention to an explicitly named constraint only when the rule
+    # interpolates that name (sqlalchemy/sql/naming.py); a finished name would be qualified twice.
+    ck_rule = metadata.naming_convention.get("ck") if metadata is not None else None
+    convention_qualifies = isinstance(ck_rule, str) and "constraint_name" in ck_rule
+
+    def check_name(rule: str) -> str:
+        return rule if convention_qualifies else f"ck_{table_name}_{rule}"
+
     return (
         # Ensure attempts_made never exceeds max_attempts at database level
-        CheckConstraint("attempts_made <= max_attempts", name=f"ck_{table_name}_attempts_valid"),
+        CheckConstraint("attempts_made <= max_attempts", name=check_name("attempts_valid")),
         # Status consistency constraints
         CheckConstraint(
             f"(status = '{EventStatus.COMPLETED.value}' AND completed_at IS NOT NULL) OR "
             f"(status != '{EventStatus.COMPLETED.value}' AND completed_at IS NULL)",
-            name=f"ck_{table_name}_completed_status_consistency",
+            name=check_name("completed_status_consistency"),
         ),
         # Locking consistency: locked_at and locked_by must be both NULL or both NOT NULL
         CheckConstraint(
             "(locked_at IS NULL AND locked_by IS NULL) OR (locked_at IS NOT NULL AND locked_by IS NOT NULL)",
-            name=f"ck_{table_name}_lock_consistency",
+            name=check_name("lock_consistency"),
         ),
         Index(
             f"idx_{table_name}_pending_fetch",
@@ -153,7 +179,10 @@ class OutboxEventDBBase(EventMixin, OutboxColumnsMixin):
 
     __abstract__ = True
     __tablename__ = "outbox_events"
-    __table_args__ = get_event_constraints("outbox_events")
+
+    @declared_attr.directive
+    def __table_args__(self) -> tuple:
+        return get_event_constraints("outbox_events", metadata=self.metadata)
 
 
 class InboxEventDBBase(EventMixin, InboxColumnsMixin):
@@ -165,16 +194,18 @@ class InboxEventDBBase(EventMixin, InboxColumnsMixin):
     # Columns for INSERT ... ON CONFLICT DO NOTHING (PostgresInboxRepository)
     __inbox_dedup_index_columns__: tuple[str, ...] = ("message_id", "consumer_group")
 
-    __table_args__ = (
-        *get_event_constraints("inbox_events"),
-        # Inbox specific unique constraint for deduplication
-        Index(
-            "idx_inbox_deduplication",
-            "message_id",
-            "consumer_group",
-            unique=True,
-        ),
-    )
+    @declared_attr.directive
+    def __table_args__(self) -> tuple:
+        return (
+            *get_event_constraints("inbox_events", metadata=self.metadata),
+            # Inbox specific unique constraint for deduplication
+            Index(
+                "idx_inbox_deduplication",
+                "message_id",
+                "consumer_group",
+                unique=True,
+            ),
+        )
 
 
 class OutboxEventPartitionedDBBase(EventMixin, OutboxColumnsMixin):
@@ -193,10 +224,12 @@ class OutboxEventPartitionedDBBase(EventMixin, OutboxColumnsMixin):
     __outbox_conflict_index_id__ = ("id", "created_at")
     __outbox_conflict_index_idempotency__ = ("idempotency_key", "created_at")
 
-    __table_args__ = (
-        *get_event_constraints("outbox_events_p", include_created_at_in_unique=True),
-        {"postgresql_partition_by": "RANGE (created_at)"},
-    )
+    @declared_attr.directive
+    def __table_args__(self) -> tuple:
+        return (
+            *get_event_constraints("outbox_events_p", include_created_at_in_unique=True, metadata=self.metadata),
+            {"postgresql_partition_by": "RANGE (created_at)"},
+        )
 
 
 class InboxEventPartitionedDBBase(EventMixin, InboxColumnsMixin):
@@ -218,23 +251,25 @@ class InboxEventPartitionedDBBase(EventMixin, InboxColumnsMixin):
 
     __inbox_dedup_index_columns__: tuple[str, ...] = ("message_id", "consumer_group", "created_at")
 
-    __table_args__ = (
-        *get_event_constraints("inbox_events_p", include_created_at_in_unique=True),
-        Index(
-            "idx_inbox_events_p_deduplication",
-            "message_id",
-            "consumer_group",
-            "created_at",
-            unique=True,
-        ),
-        Index(
-            "idx_inbox_events_p_message_consumer",
-            "message_id",
-            "consumer_group",
-            unique=False,
-        ),
-        {"postgresql_partition_by": "RANGE (created_at)"},
-    )
+    @declared_attr.directive
+    def __table_args__(self) -> tuple:
+        return (
+            *get_event_constraints("inbox_events_p", include_created_at_in_unique=True, metadata=self.metadata),
+            Index(
+                "idx_inbox_events_p_deduplication",
+                "message_id",
+                "consumer_group",
+                "created_at",
+                unique=True,
+            ),
+            Index(
+                "idx_inbox_events_p_message_consumer",
+                "message_id",
+                "consumer_group",
+                unique=False,
+            ),
+            {"postgresql_partition_by": "RANGE (created_at)"},
+        )
 
 
 # Type aliases
