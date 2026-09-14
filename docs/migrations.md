@@ -205,6 +205,28 @@ class InboxEventDB(Base, InboxEventDBBase):
 
 You can override `__tablename__`, add service-specific columns, or change `__inbox_dedup_index_columns__` if you partition.
 
+## Naming conventions
+
+The check constraints are named `ck_<table>_<rule>` — `ck_outbox_events_attempts_valid`, as in the DDL above — unless the `MetaData` of your `DeclarativeBase` carries a `ck` naming convention that interpolates `%(constraint_name)s`. Then the bases hand the convention the bare rule (`attempts_valid`, `completed_status_consistency`, `lock_consistency`) and it builds the name: `sqlalchemy-foundation-kit`'s `"%(table_name)s_%(constraint_name)s_check"` gives `outbox_events_attempts_valid_check`, SQLAlchemy's documented `"ck_%(table_name)s_%(constraint_name)s"` gives `ck_outbox_events_attempts_valid` again. Every name fits PostgreSQL's 63-byte limit either way; the longest, `outbox_events_partitioned_completed_status_consistency_check`, is 60. A finished name handed to such a convention would be qualified a second time, run past 63 bytes and be truncated with a hash. The indexes keep their `idx_<table>_…` names under any convention — SQLAlchemy leaves an explicitly named `Index` alone unless the `ix` rule interpolates `%(constraint_name)s`, which neither of the conventions above does.
+
+If you compose `__table_args__` yourself, pass the metadata so the helper can see the convention:
+
+```python
+class OrdersOutbox(Base, OutboxEventDBBase):
+    __tablename__ = "orders_outbox"
+    __table_args__ = get_event_constraints("orders_outbox", metadata=Base.metadata)
+```
+
+Up to 0.2.1 the bases always declared the finished name, so a database created under such a convention holds the doubly qualified names, six of the twelve truncated with a hash — `outbox_events_ck_outbox_events_completed_status_consist_a784`. Alembic's autogenerate does not compare check constraints unless `alembic.ext.checkconstraint_byname` (Alembic 1.19+) is enabled, so rename them in a hand-written migration. They are the ones with `_ck_` in the middle:
+
+```sql
+SELECT conrelid::regclass, conname FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\_ck\_%';
+ALTER TABLE outbox_events RENAME CONSTRAINT outbox_events_ck_outbox_events_completed_status_consist_a784
+    TO outbox_events_completed_status_consistency_check;
+```
+
+The four bases also build `__table_args__` in a `declared_attr` now, so a workaround that read the tuple off the abstract class — `OutboxEventPartitionedDBBase.__table_args__`, to wrap the names in `conv()` by hand — raises `AttributeError: type object 'OutboxEventPartitionedDBBase' has no attribute 'metadata'` at import. Delete it; the bases produce the convention's names on their own.
+
 ## Alembic example
 
 ```python
