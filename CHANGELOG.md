@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.2.1...omni-box-v0.2.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **postgres:** stop a naming convention from qualifying the check constraints twice ([e125d39](https://github.com/bedrock-python/omni-box/commit/e125d39301f4f4ec0521a87cfa23241076ceb893))
+
 ## [0.2.1](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.2.0...omni-box-v0.2.1) (2026-09-07)
 
 
