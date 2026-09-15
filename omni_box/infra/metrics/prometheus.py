@@ -145,3 +145,35 @@ class PrometheusInboxMetrics(InboxMetrics):
 
     def observe_handler_duration(self, seconds: float, event_type: str | None = None) -> None:
         self._handler_duration_seconds.labels(event_type=event_type or "unknown").observe(seconds)
+
+
+_OUTBOX_METRICS_CACHE: dict[str | None, PrometheusOutboxMetrics] = {}
+_INBOX_METRICS_CACHE: dict[str | None, PrometheusInboxMetrics] = {}
+
+
+def get_outbox_metrics(prefix: str | None = None) -> PrometheusOutboxMetrics:
+    """Get (or lazily create) the cached ``PrometheusOutboxMetrics`` for a prefix, on the default registry.
+
+    Prometheus registers a metric name once per registry, so a second
+    ``PrometheusOutboxMetrics()`` with the same prefix raises ``ValueError``.
+    Caching by prefix is what lets a container be rebuilt — a test suite does
+    it per test — without asking Prometheus to register the same series twice.
+    """
+    prefix = prefix or None
+    metrics = _OUTBOX_METRICS_CACHE.get(prefix)
+    if metrics is None:
+        metrics = _OUTBOX_METRICS_CACHE[prefix] = PrometheusOutboxMetrics(prefix=prefix)
+    return metrics
+
+
+def get_inbox_metrics(prefix: str | None = None) -> PrometheusInboxMetrics:
+    """Get (or lazily create) the cached ``PrometheusInboxMetrics`` for a prefix, on the default registry.
+
+    See :func:`get_outbox_metrics`; the same one-instance-per-prefix rule,
+    for the inbox collector.
+    """
+    prefix = prefix or None
+    metrics = _INBOX_METRICS_CACHE.get(prefix)
+    if metrics is None:
+        metrics = _INBOX_METRICS_CACHE[prefix] = PrometheusInboxMetrics(prefix=prefix)
+    return metrics

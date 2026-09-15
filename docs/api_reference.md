@@ -212,6 +212,8 @@ Neither adapter depends on any external "kit" package; only `aiokafka` is requir
 
 `omni_box.infra.metrics` provides `PrometheusInboxMetrics(prefix=None)` and `PrometheusOutboxMetrics(prefix=None)` — implementations of `InboxMetrics` and `OutboxMetrics`. `ProcessingMetrics` is the shared base of those two protocols and has no implementation of its own. Wire them into the factories or pass to `MetricsStep` directly.
 
+`get_inbox_metrics(prefix=None)` and `get_outbox_metrics(prefix=None)` return the one instance per prefix on the default registry, creating it on first use. Prometheus refuses to register the same series twice, so a second `PrometheusOutboxMetrics()` for a prefix raises `ValueError`; the getters are what to call from anything that is built more than once per process, such as a container rebuilt per test.
+
 ## Version
 
 ```python

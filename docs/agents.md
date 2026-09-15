@@ -401,8 +401,11 @@ tracing ids).
 ### Elsewhere
 
 `omni_box.infra.metrics` (extra `metrics`) — `PrometheusOutboxMetrics(prefix=None)`,
-`PrometheusInboxMetrics(prefix=None)`; `ProcessingMetrics` is the shared base of the two
-protocols, not a third implementation. `EventBatchProcessor` sets
+`PrometheusInboxMetrics(prefix=None)`, and `get_outbox_metrics(prefix=None)` /
+`get_inbox_metrics(prefix=None)`, the one instance per prefix on the default registry —
+Prometheus refuses a second registration of the same series, so anything built more than
+once per process takes the collector from the getter. `ProcessingMetrics` is the shared
+base of the two protocols, not a third implementation. `EventBatchProcessor` sets
 `set_locked_batch_size(len(batch))` after every fetch, zero included.
 `omni_box.contrib.settings` (extra `settings`) —
 `BaseOutboxSettings` / `BaseInboxSettings`, reading `OMNI_OUTBOX_` / `OMNI_INBOX_` with

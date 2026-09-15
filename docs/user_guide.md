@@ -310,6 +310,14 @@ structlog.configure(
 
 Pass `metrics=` to any factory or to `MetricsStep`. Either implement `InboxMetrics` / `OutboxMetrics` yourself or use the Prometheus adapters from `omni_box.infra.metrics` (extra: `metrics`).
 
+Prometheus registers a metric name once per registry, so building `PrometheusOutboxMetrics()` a second time with the same prefix raises `ValueError: Duplicated timeseries`. Take the collectors from `get_outbox_metrics(prefix=None)` / `get_inbox_metrics(prefix=None)` instead: one instance per prefix on the default registry, so a container or a service object rebuilt per test does not re-register the series.
+
+```python
+from omni_box.infra.metrics import get_outbox_metrics
+
+publisher = OutboxPublisher(repo, broker, metrics=get_outbox_metrics(prefix="billing"))
+```
+
 ### OpenTelemetry
 
 Add `OpenTelemetryStep(service_name="my-service")` to your pipeline (extra: `opentelemetry`).
