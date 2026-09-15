@@ -401,13 +401,21 @@ tracing ids).
 ### Elsewhere
 
 `omni_box.infra.metrics` (extra `metrics`) — `PrometheusOutboxMetrics(prefix=None)`,
-`PrometheusInboxMetrics(prefix=None)`; `ProcessingMetrics` is the shared base of the two
-protocols, not a third implementation. `EventBatchProcessor` sets
+`PrometheusInboxMetrics(prefix=None)`, and `get_outbox_metrics(prefix=None)` /
+`get_inbox_metrics(prefix=None)`, the one instance per prefix on the default registry —
+Prometheus refuses a second registration of the same series, so anything built more than
+once per process takes the collector from the getter. `ProcessingMetrics` is the shared
+base of the two protocols, not a third implementation. `EventBatchProcessor` sets
 `set_locked_batch_size(len(batch))` after every fetch, zero included.
 `omni_box.contrib.settings` (extra `settings`) —
 `BaseOutboxSettings` / `BaseInboxSettings`, reading `OMNI_OUTBOX_` / `OMNI_INBOX_` with
 `__` as the nesting delimiter. `omni_box.contrib.dishka` (extra `dishka`) —
-`EventDispatcherProvider`, `DIAwareEventRouter`, `create_di_router`.
+`EventDispatcherProvider`, `DIAwareEventRouter`, `create_di_router`, and
+`PrometheusInboxMetricsProvider(prefix=None)` / `PrometheusOutboxMetricsProvider(prefix=None)`
+(extras `settings` and `metrics` too): each provides `InboxMetrics | None` /
+`OutboxMetrics | None` — the key to request for `metrics=` — from the getters above when the
+`BaseInboxSettings` / `BaseOutboxSettings` registered in the container has
+`observability.enable_metrics` on, `None` otherwise.
 `omni_box.testing` — `assert_outbox_event_created`. `omni_box.utils` — `utc_now`,
 `calculate_backoff_with_jitter`, `ErrorClassifier`.
 
@@ -572,6 +580,16 @@ runner = InboxConsumerRunner(..., handler=None, ack_strategy=AckStrategy.AT_LEAS
 processor = create_inbox_processor(repo=inbox_repo, handler=flaky_handler)
 async with session_factory() as session, session.begin():
     await processor.process_batch(worker_id="inbox-1", batch_size=50)
+```
+
+```python
+# WRONG — a collector per container: the second one raises ValueError: Duplicated timeseries
+@provide(scope=Scope.APP)
+def metrics(self) -> OutboxMetrics | None:
+    return PrometheusOutboxMetrics(prefix="billing")
+
+# RIGHT — the kit's provider, one collector per prefix, gated on the section's own settings
+make_async_container(EventDispatcherProvider(), PrometheusOutboxMetricsProvider(prefix="billing"), AppProvider())
 ```
 
 ```python

@@ -13,6 +13,8 @@ from omni_box.infra.metrics.prometheus import (
     PrometheusInboxMetrics,
     PrometheusOutboxMetrics,
     _metric_name,
+    get_inbox_metrics,
+    get_outbox_metrics,
 )
 
 if TYPE_CHECKING:
@@ -331,6 +333,75 @@ def test__prometheus_inbox_metrics__observe_handler_duration_no_label__uses_unkn
     # Assert
     hist = metrics._handler_duration_seconds.labels(event_type="unknown")
     assert hist._sum.get() == pytest.approx(1.0)  # type: ignore[attr-defined]
+
+
+# -------- cached getters --------
+
+
+def test__prometheus_outbox_metrics__built_twice_for_one_prefix__raises() -> None:
+    """The reason the getters exist: the default registry refuses the same series twice."""
+    # Arrange
+    prefix = _unique_prefix("out_twice")
+    PrometheusOutboxMetrics(prefix=prefix)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="Duplicated timeseries"):
+        PrometheusOutboxMetrics(prefix=prefix)
+
+
+def test__get_outbox_metrics__same_prefix_twice__returns_the_cached_instance() -> None:
+    """A second container asking for the same prefix gets the instance the first one registered."""
+    # Arrange
+    prefix = _unique_prefix("out_cache")
+
+    # Act
+    first = get_outbox_metrics(prefix)
+    second = get_outbox_metrics(prefix)
+
+    # Assert
+    assert first is second
+    assert isinstance(first, PrometheusOutboxMetrics)
+
+
+def test__get_outbox_metrics__different_prefixes__different_instances() -> None:
+    # Act
+    first = get_outbox_metrics(_unique_prefix("out_a"))
+    second = get_outbox_metrics(_unique_prefix("out_b"))
+
+    # Assert
+    assert first is not second
+
+
+def test__get_outbox_metrics__empty_prefix__same_instance_as_none() -> None:
+    """``_metric_name`` treats ``""`` as no prefix, so the cache must too or the second call re-registers."""
+    # Act
+    first = get_outbox_metrics(None)
+    second = get_outbox_metrics("")
+
+    # Assert
+    assert first is second
+
+
+def test__get_inbox_metrics__same_prefix_twice__returns_the_cached_instance() -> None:
+    # Arrange
+    prefix = _unique_prefix("in_cache")
+
+    # Act
+    first = get_inbox_metrics(prefix)
+    second = get_inbox_metrics(prefix)
+
+    # Assert
+    assert first is second
+    assert isinstance(first, PrometheusInboxMetrics)
+
+
+def test__get_inbox_metrics__different_prefixes__different_instances() -> None:
+    # Act
+    first = get_inbox_metrics(_unique_prefix("in_a"))
+    second = get_inbox_metrics(_unique_prefix("in_b"))
+
+    # Assert
+    assert first is not second
 
 
 # -------- import fallback (module-level except branch) --------

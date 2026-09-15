@@ -61,3 +61,34 @@ With the `settings` extra installed, `omni_box.contrib.settings` exposes ready-t
 ## DI integration (Dishka)
 
 With the `dishka` extra installed, `omni_box.contrib.dishka` provides ready-made `Provider` classes. A minimal example lives in [`docs/examples/dishka_integration.py`](../examples/dishka_integration.py).
+
+`EventDispatcherProvider` provides the `EventRouter` and the DI-aware router around it. `PrometheusInboxMetricsProvider(prefix=None)` and `PrometheusOutboxMetricsProvider(prefix=None)` provide the Prometheus collectors under the keys the rest of the kit takes as `metrics=`: `InboxMetrics | None` and `OutboxMetrics | None`. Each reads the section's own settings — `BaseInboxSettings` / `BaseOutboxSettings`, which your application registers under exactly those keys — and provides the collector when `observability.enable_metrics` is on (the default), `None` otherwise; the factories, `OutboxPublisher` and `InboxConsumerRunner` swap in the no-op on `None`. The collectors come from `get_inbox_metrics` / `get_outbox_metrics`, so a container rebuilt per test does not re-register the series. They need the `settings` extra, and the `metrics` extra once metrics are enabled — the collector raises `ImportError` naming it otherwise.
+
+```python
+from dishka import Provider, Scope, make_async_container, provide
+
+from omni_box import EventPublisher, OutboxEventRepository, OutboxMetrics, OutboxPublisher
+from omni_box.contrib.dishka import EventDispatcherProvider, PrometheusOutboxMetricsProvider
+from omni_box.contrib.settings import BaseOutboxSettings
+
+
+class AppProvider(Provider):
+    scope = Scope.APP
+
+    @provide
+    def outbox_settings(self) -> BaseOutboxSettings:
+        return BaseOutboxSettings()
+
+    @provide
+    def publisher(self, repo: OutboxEventRepository, broker: EventPublisher, metrics: OutboxMetrics | None) -> OutboxPublisher:
+        return OutboxPublisher(repo, broker, metrics=metrics)
+
+
+container = make_async_container(
+    EventDispatcherProvider(),
+    PrometheusOutboxMetricsProvider(prefix="billing"),
+    AppProvider(),
+)
+```
+
+A service with only an inbox registers `PrometheusInboxMetricsProvider` and `BaseInboxSettings` alone; the two providers are independent.
