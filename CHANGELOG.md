@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.2.2...omni-box-v0.3.0) (2026-09-15)
+
+
+### Features
+
+* dishka providers for the Prometheus collectors, and one collector per prefix ([29724c2](https://github.com/bedrock-python/omni-box/commit/29724c200b7ae1326de68822a7a6215cbaa22cef)), closes [#40](https://github.com/bedrock-python/omni-box/issues/40)
+
 ## [0.2.2](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.2.1...omni-box-v0.2.2) (2026-09-14)
 
 
