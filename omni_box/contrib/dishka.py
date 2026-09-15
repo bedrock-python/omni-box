@@ -3,6 +3,11 @@
 Available with the ``dishka`` extra:
 
     pip install "omni-box[dishka]"
+
+The Prometheus metrics providers also need the ``settings`` extra for the
+settings they read, and the ``metrics`` extra once metrics are enabled:
+
+    pip install "omni-box[dishka,settings,metrics]"
 """
 
 from __future__ import annotations
@@ -21,7 +26,9 @@ except ImportError as _e:  # pragma: no cover - exercised only without the extra
 
 from .. import EventRouter, InboxEvent, InboxEventRepository
 from ..core.dispatch.names import DispatchName, as_dispatch_str
+from ..core.protocols.metrics import InboxMetrics, OutboxMetrics
 from ..core.services.results import EventHandlerResult, coerce_handler_outcome
+from ..infra.metrics import get_inbox_metrics, get_outbox_metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -177,10 +184,70 @@ class EventDispatcherProvider(Provider):
         return DIAwareEventRouter(router, container)
 
 
+try:
+    from .settings import BaseInboxSettings, BaseOutboxSettings
+
+    class PrometheusInboxMetricsProvider(Provider):
+        """Dishka provider for the inbox Prometheus collector (``settings`` and ``metrics`` extras).
+
+        Provides ``InboxMetrics | None`` (APP scope): :func:`get_inbox_metrics`
+        for ``prefix`` when :class:`BaseInboxSettings` — registered by the
+        application — has ``observability.enable_metrics`` on, ``None``
+        otherwise. That is the ``metrics`` argument the factories and
+        :class:`InboxConsumerRunner` take; they fall back to the no-op on
+        ``None``. One collector per prefix on the default registry, so a
+        container rebuilt per test never asks Prometheus to register the same
+        series twice.
+        """
+
+        scope = Scope.APP
+
+        def __init__(self, *, prefix: str | None = None) -> None:
+            super().__init__()
+            self._prefix = prefix
+
+        @provide
+        def get_metrics(self, settings: BaseInboxSettings) -> InboxMetrics | None:
+            if not settings.observability.enable_metrics:
+                return None
+            return get_inbox_metrics(self._prefix)
+
+    class PrometheusOutboxMetricsProvider(Provider):
+        """Dishka provider for the outbox Prometheus collector (``settings`` and ``metrics`` extras).
+
+        Provides ``OutboxMetrics | None`` (APP scope): :func:`get_outbox_metrics`
+        for ``prefix`` when :class:`BaseOutboxSettings` — registered by the
+        application — has ``observability.enable_metrics`` on, ``None``
+        otherwise. That is the ``metrics`` argument the factories and
+        :class:`OutboxPublisher` take; they fall back to the no-op on ``None``.
+        One collector per prefix on the default registry, so a container
+        rebuilt per test never asks Prometheus to register the same series
+        twice.
+        """
+
+        scope = Scope.APP
+
+        def __init__(self, *, prefix: str | None = None) -> None:
+            super().__init__()
+            self._prefix = prefix
+
+        @provide
+        def get_metrics(self, settings: BaseOutboxSettings) -> OutboxMetrics | None:
+            if not settings.observability.enable_metrics:
+                return None
+            return get_outbox_metrics(self._prefix)
+
+except ImportError:  # pragma: no cover - exercised only without the ``settings`` extra
+    PrometheusInboxMetricsProvider = None  # type: ignore[assignment,misc]
+    PrometheusOutboxMetricsProvider = None  # type: ignore[assignment,misc]
+
+
 __all__ = [
     "DIAwareEventRouter",
     "DefaultTopicDenormalizer",
     "EventDispatcherProvider",
+    "PrometheusInboxMetricsProvider",
+    "PrometheusOutboxMetricsProvider",
     "TopicDenormalizer",
     "create_di_router",
 ]
