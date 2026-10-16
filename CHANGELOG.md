@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.3.0...omni-box-v0.3.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **inbox:** rewind a message the runner does not commit instead of reading past it ([#62](https://github.com/bedrock-python/omni-box/issues/62)) ([317641f](https://github.com/bedrock-python/omni-box/commit/317641f2cfb08763338537f8e2d9d3eca99250cf)), closes [#58](https://github.com/bedrock-python/omni-box/issues/58)
+* **inbox:** roll back a runner handler that returns handler_retry() and complete a skipped row ([#63](https://github.com/bedrock-python/omni-box/issues/63)) ([e78d84c](https://github.com/bedrock-python/omni-box/commit/e78d84cd8794df8ad563bc5549822da1341511da)), closes [#59](https://github.com/bedrock-python/omni-box/issues/59)
+* **outbox:** back off counted retries and keep each key's events in order behind a failed one ([#64](https://github.com/bedrock-python/omni-box/issues/64)) ([d9ef2f9](https://github.com/bedrock-python/omni-box/commit/d9ef2f9994ab4b9b333691bd45604423ffb34c92)), closes [#60](https://github.com/bedrock-python/omni-box/issues/60) [#61](https://github.com/bedrock-python/omni-box/issues/61)
+
 ## [0.3.0](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.2.2...omni-box-v0.3.0) (2026-09-15)
 
 
