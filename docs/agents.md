@@ -296,8 +296,8 @@ Commit semantics, exactly as the runner implements them:
 |---|---|
 | `AT_MOST_ONCE` | before the transaction is even attempted |
 | `AT_LEAST_ONCE` + `ON_PERSIST` | after the transaction, success or failure |
-| `AT_LEAST_ONCE` + `ON_SUCCESS` | only when the handler returned a result with `processed=True`, or the row was already `completed` |
-| `EXACTLY_ONCE_INBOX` | when there is no handler, when the handler succeeded, when it skipped, or when the row was already `completed` — and on a handler exception only if `exactly_once_commit_on_failed=True`. Not when another worker held the row's lock: the handler did not run, so the message is left for redelivery |
+| `AT_LEAST_ONCE` + `ON_SUCCESS` | when the handler succeeded or skipped, or the row was already `completed`; not when it raised or returned a failure |
+| `EXACTLY_ONCE_INBOX` | when there is no handler, when the handler succeeded, when it skipped, or when the row was already `completed` — and on a handler exception or a returned failure only if `exactly_once_commit_on_failed=True`. Not when another worker held the row's lock: the handler did not run, so the message is left for redelivery |
 
 A message that is not committed — `committed=False`, or `process_one()` raised after reading
 it — is rewound: `process_one()` calls `AckHandle.rewind()` before it returns, and the next
@@ -361,6 +361,14 @@ constructors are re-exported at the top level:
 | `handler_completed(status=COMPLETED)` | `completed` |
 | `handler_skipped(status=SKIPPED)` | skipped — not completed, not failed, `attempts_made` untouched |
 | `handler_retry(message, *, count_as_attempt=True, next_retry_at=None, status=RETRY)` | failure; `attempts_made + 1` unless you say otherwise |
+
+That table is the batch processors. A handler passed to `InboxConsumerRunner` has no
+attempt budget (rule 5), so there `handler_completed()` and `None` complete the row,
+`handler_skipped()` completes it as well (the message was handled by deciding not to act on
+it, and a redelivery is a duplicate), and `handler_retry(...)` — or any `EventHandlerResult`
+with `success=False, processed=True` — is handled exactly like a raise: the handler's writes
+and the inbox row roll back together and the commit follows the handler-exception rule of
+the `ack_strategy`. `count_as_attempt` and `next_retry_at` have no effect there.
 
 `EventHandlerStatus` is `COMPLETED`, `STALE`, `SKIPPED`, `FAILED`, `RETRY`.
 
@@ -465,7 +473,9 @@ base of the two protocols, not a third implementation. `EventBatchProcessor` set
    get `processed=False, duplicate=False, committed=False`. In both cases the runner rewinds
    the message, so the next read is that message again rather than the one after it.
 5. **The runner never records a failure.** It calls neither `mark_failed` nor anything that
-   increments `attempts_made`, so `max_attempts` does nothing on that path. The retry budget
+   increments `attempts_made`, so `max_attempts` does nothing on that path. A handler that
+   returns `handler_retry(...)` there is rolled back like one that raises, and the retry comes
+   from the broker. The retry budget
    only exists for the batch processors (`create_*_processor`, `EventBatchProcessor`).
 6. **`worker_id` is validated** by the PostgreSQL fetch-and-lock path: `[A-Za-z0-9.\-/:]`
    only, at most 255 characters. An underscore or a space raises `ValueError` at fetch time,

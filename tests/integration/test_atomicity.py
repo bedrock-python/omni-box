@@ -10,7 +10,15 @@ import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from omni_box import InboxConsumerRunner, InboxEvent, InboxEventRepository
+from omni_box import (
+    AckStrategy,
+    EventHandlerResult,
+    InboxConsumerRunner,
+    InboxEvent,
+    InboxEventRepository,
+    handler_retry,
+    handler_skipped,
+)
 from omni_box.core.models.entities import OutboxEvent
 from omni_box.core.models.enums import EventStatus
 from omni_box.core.protocols import ConsumedMessage, NullAckHandle
@@ -287,3 +295,106 @@ async def test__inbox_runner__handler_raises_after_writing_through_repo_session_
         ).scalar_one_or_none()
     assert business_rows == []
     assert inbox_row is None
+
+
+async def _inbox_row(session_factory: async_sessionmaker[AsyncSession], message_id: str) -> ConcreteInboxEvent | None:
+    async with session_factory() as session:
+        return (
+            await session.execute(select(ConcreteInboxEvent).where(ConcreteInboxEvent.message_id == message_id))
+        ).scalar_one_or_none()
+
+
+async def _business_rows(session_factory: async_sessionmaker[AsyncSession]) -> list[str]:
+    async with session_factory() as session:
+        return [row.data for row in (await session.execute(select(business_table))).all()]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test__inbox_runner__handler_returns_retry__rolls_back_and_the_redelivery_runs_it_once_more(
+    db_engine: AsyncEngine,
+) -> None:
+    # Arrange: the handler writes, then asks for a retry on its first call only
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False, class_=AsyncSession)
+    message = _make_message()
+    calls: list[int] = []
+
+    async def handler(event: InboxEvent, repo: InboxEventRepository) -> EventHandlerResult | None:
+        assert isinstance(repo, PostgresInboxRepository)
+        calls.append(1)
+        await repo.session.execute(insert(business_table).values(id=1, data=event.payload["order_id"]))
+        if len(calls) == 1:
+            return handler_retry("downstream not ready")
+        return None
+
+    runner = InboxConsumerRunner(
+        consumer=OneMessageConsumer(message),  # redelivers the uncommitted message, as Kafka does
+        transaction_provider=SessionPerTransactionProvider(session_factory),
+        handler=handler,
+        worker_id="inbox-1",
+        consumer_group="billing",
+        ack_strategy=AckStrategy.EXACTLY_ONCE_INBOX,
+    )
+    await runner.start()
+
+    # Act
+    try:
+        first = await runner.process_one()
+        rows_after_first = await _business_rows(session_factory)
+        inbox_after_first = await _inbox_row(session_factory, message.message_id)
+        second = await runner.process_one()
+    finally:
+        await runner.stop()
+
+    # Assert: the retry left nothing behind, and the redelivery did the work exactly once
+    assert (first.committed, first.processed) == (False, False)
+    assert rows_after_first == []
+    assert inbox_after_first is None
+    assert (second.committed, second.processed) == (True, True)
+    assert len(calls) == 2
+    assert await _business_rows(session_factory) == ["42"]
+    inbox_row = await _inbox_row(session_factory, message.message_id)
+    assert inbox_row is not None
+    assert inbox_row.status == EventStatus.COMPLETED
+    assert inbox_row.locked_by is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test__inbox_runner__handler_returns_skipped__completes_the_row_and_the_redelivery_is_a_duplicate(
+    db_engine: AsyncEngine,
+) -> None:
+    # Arrange
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False, class_=AsyncSession)
+    message = _make_message()
+    calls: list[int] = []
+
+    async def handler(event: InboxEvent, repo: InboxEventRepository) -> EventHandlerResult:
+        calls.append(1)
+        return handler_skipped()
+
+    runner = InboxConsumerRunner(
+        consumer=OneMessageConsumer(message),
+        transaction_provider=SessionPerTransactionProvider(session_factory),
+        handler=handler,
+        worker_id="inbox-1",
+        consumer_group="billing",
+        ack_strategy=AckStrategy.EXACTLY_ONCE_INBOX,
+    )
+    await runner.start()
+
+    # Act
+    try:
+        first = await runner.process_one()
+        inbox_after_first = await _inbox_row(session_factory, message.message_id)
+        redelivery = await runner.process_one()
+    finally:
+        await runner.stop()
+
+    # Assert: the row is finished and unlocked, so retention can delete it and a redelivery is a duplicate
+    assert (first.committed, first.processed) == (True, False)
+    assert inbox_after_first is not None
+    assert inbox_after_first.status == EventStatus.COMPLETED
+    assert inbox_after_first.locked_by is None
+    assert (redelivery.duplicate, redelivery.committed) == (True, True)
+    assert len(calls) == 1
