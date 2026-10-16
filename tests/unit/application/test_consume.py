@@ -270,7 +270,7 @@ async def test__inbox_message_processor__handler_returns_none__coerced_and_marks
     assert repo.completed == [(event.id, "w1")]
 
 
-async def test__inbox_message_processor__handler_returns_failure__does_not_mark_completed() -> None:
+async def test__inbox_message_processor__handler_returns_failure__rolls_back_as_an_error() -> None:
     # Arrange
     repo = _FakeInboxRepo()
 
@@ -288,10 +288,11 @@ async def test__inbox_message_processor__handler_returns_failure__does_not_mark_
     # Act
     stored, result, error, _ = await processor.process_in_transaction(event)
 
-    # Assert
+    # Assert: raised inside the transaction, so the handler's writes roll back with the row
     assert stored is not None
     assert result is not None and result.success is False
-    assert error is None
+    assert error is not None
+    assert str(error) == "nope"
     assert repo.completed == []
 
 
@@ -972,6 +973,64 @@ async def test__inbox_consumer_runner__exactly_once_handler_skipped__commits_bec
     assert ack.commit_count == 1
 
 
+async def test__inbox_consumer_runner__handler_skipped__marks_the_row_completed() -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack)])
+    repo = _FakeInboxRepo()
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> EventHandlerResult:
+        return handler_skipped()
+
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(repo),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+
+    # Act
+    result = await runner.process_one()
+
+    # Assert
+    assert result.processed is False
+    assert result.committed is True
+    assert repo.completed == [(repo.created[0].id, "w1")]
+
+
+async def test__inbox_consumer_runner__handler_retry_exactly_once__not_committed_and_rewound() -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack, event_type="t")])
+    repo = _FakeInboxRepo()
+    metrics = _FakeInboxMetrics()
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> EventHandlerResult:
+        return handler_retry("downstream not ready")
+
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(repo),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+        metrics=metrics,
+    )
+
+    # Act
+    result = await runner.process_one()
+
+    # Assert
+    assert result.committed is False
+    assert result.processed is False
+    assert ack.commit_count == 0
+    assert ack.rewind_count == 1
+    assert metrics.failed == ["t"]
+    assert metrics.processed == []
+    assert repo.completed == []
+
+
 async def test__inbox_consumer_runner__null_ack_handle_when_message_has_none__no_error() -> None:
     # Arrange
     consumer = _FakeConsumer(messages=[_make_message(ack_handle=None)])
@@ -1230,13 +1289,27 @@ async def test__inbox_consumer_runner__handler_error_at_least_once_on_success__d
             AckStrategy.AT_LEAST_ONCE,
             CommitOffsetPolicy.ON_SUCCESS,
             handler_skipped,
+            True,
+        ),
+        (
+            AckStrategy.AT_LEAST_ONCE,
+            CommitOffsetPolicy.ON_SUCCESS,
+            lambda: handler_retry("later"),
             False,
+        ),
+        (
+            AckStrategy.AT_LEAST_ONCE,
+            CommitOffsetPolicy.ON_PERSIST,
+            lambda: handler_retry("later"),
+            True,
         ),
     ],
     ids=[
         "at-least-once-on-persist-completed-commits",
         "at-least-once-on-success-completed-commits",
-        "at-least-once-on-success-skipped-no-commit",
+        "at-least-once-on-success-skipped-commits",
+        "at-least-once-on-success-retry-no-commit",
+        "at-least-once-on-persist-retry-commits",
     ],
 )
 async def test__inbox_consumer_runner__at_least_once_paths__commit_decision(
@@ -1336,12 +1409,11 @@ async def test__inbox_consumer_runner__handler_returns_failed_processed__updates
     # Act
     result = await runner.process_one()
 
-    # Assert
-    # processed=True but success=False -> not processed/success branch False; commit decision:
-    # handler_result is not None, not handler_result.processed=False, handler_result.success=False ->
-    # condition `not processed or success` is False or False -> False => no commit
+    # Assert: handled as a raise -- counted once as failed, not processed, not committed
     assert result.committed is False
+    assert result.processed is False
     assert metrics.failed == ["t"]
+    assert repo.completed == []
 
 
 # -------- _should_commit_offset internals --------
@@ -1426,6 +1498,28 @@ def test__should_commit_offset__unknown_strategy__falls_through_to_false() -> No
 
     # Act / Assert
     assert runner._should_commit_offset(handler_completed(), False) is False
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (handler_completed(), True),
+        (handler_skipped(), True),
+        (EventHandlerResult(success=False, processed=True), False),
+    ],
+    ids=["completed", "skipped", "processed-failure"],
+)
+def test__should_commit_offset__at_least_once_on_success__commits_a_finished_message(
+    result: EventHandlerResult, expected: bool
+) -> None:
+    # Arrange
+    runner = _make_runner(
+        ack_strategy=AckStrategy.AT_LEAST_ONCE,
+        commit_offset_policy=CommitOffsetPolicy.ON_SUCCESS,
+    )
+
+    # Act / Assert
+    assert runner._should_commit_offset(result, False) is expected
 
 
 def test__should_commit_offset__exactly_once_handler_processed_failure__returns_false() -> None:

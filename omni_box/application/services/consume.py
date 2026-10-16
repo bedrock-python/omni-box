@@ -27,6 +27,7 @@ from ...core.services.results import EventHandlerResult, coerce_handler_outcome
 
 if TYPE_CHECKING:
     from ...core.models.entities import InboxEvent
+    from ...core.protocols import InboxEventRepository
     from ...core.protocols.metrics import InboxMetrics
     from ...core.protocols.transaction import InboxTransactionProviderProtocol
 
@@ -46,6 +47,19 @@ class CommitOffsetPolicy(StrEnum):
 
     ON_PERSIST = "on_persist"
     ON_SUCCESS = "on_success"
+
+
+class _HandlerRetryRequestedError(Exception):
+    """Rolls back the inbox transaction when a runner's handler returns a failure.
+
+    The runner has no failure to record (it never calls ``mark_failed``), so a
+    returned failure is handled as a raised one: the handler's writes and the
+    inbox row roll back together and the broker redelivers the message.
+    """
+
+    def __init__(self, result: EventHandlerResult) -> None:
+        super().__init__(result.error_message or "Handler requested a retry")
+        self.result = result
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,14 +151,7 @@ class InboxMessageProcessor:
                                 timeout=self._process_timeout,
                             )
                             handler_result = coerce_handler_outcome(raw)
-                            if handler_result.success:
-                                await repo.mark_completed(stored.id, self._worker_id)
-                                logger.info(
-                                    "Inbox event processed successfully",
-                                    event_id=str(stored.id),
-                                    message_id=stored.message_id,
-                                    duration_seconds=round(perf_counter() - started_at, 4),
-                                )
+                            await self._settle(repo, stored, handler_result, started_at)
                         except Exception as exc:
                             handler_error = exc
                             raise
@@ -159,6 +166,13 @@ class InboxMessageProcessor:
                     event_id=str(event.id),
                     message_id=event.message_id,
                 )
+            elif isinstance(e, _HandlerRetryRequestedError):
+                logger.warning(
+                    "Inbox handler requested a retry; transaction rolled back",
+                    event_id=str(event.id),
+                    message_id=event.message_id,
+                    reason=str(e),
+                )
             else:
                 logger.exception(
                     "Inbox handler failed; transaction rolled back",
@@ -168,6 +182,24 @@ class InboxMessageProcessor:
             handler_error = e
 
         return stored, handler_result, handler_error, started_at
+
+    async def _settle(
+        self, repo: InboxEventRepository, stored: InboxEvent, result: EventHandlerResult, started_at: float
+    ) -> None:
+        """Complete the row on a success or a skip; on a returned failure, roll the transaction back.
+
+        A skip is a decision about the message, so it finishes the row too: a
+        redelivery is then a duplicate rather than a row left locked.
+        """
+        if result.processed and not result.success:
+            raise _HandlerRetryRequestedError(result)
+        await repo.mark_completed(stored.id, self._worker_id)
+        logger.info(
+            "Inbox event processed successfully" if result.processed else "Inbox event skipped by its handler",
+            event_id=str(stored.id),
+            message_id=stored.message_id,
+            duration_seconds=round(perf_counter() - started_at, 4),
+        )
 
 
 class InboxConsumerRunner:
@@ -401,7 +433,7 @@ class InboxConsumerRunner:
             if self._commit_offset_policy == CommitOffsetPolicy.ON_PERSIST:
                 return True
             if self._commit_offset_policy == CommitOffsetPolicy.ON_SUCCESS:
-                return handler_result is None or handler_result.processed
+                return handler_result is None or not handler_result.processed or handler_result.success
 
         elif self._ack_strategy == AckStrategy.EXACTLY_ONCE_INBOX:
             if not self._processor.has_handler:

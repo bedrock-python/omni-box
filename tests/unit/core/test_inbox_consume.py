@@ -249,7 +249,7 @@ async def test__inbox_consumer_runner__at_least_once_on_success_policy__commits_
 
 
 @pytest.mark.asyncio
-async def test__inbox_consumer_runner__at_least_once_on_success_policy_failure__still_commits() -> None:
+async def test__inbox_consumer_runner__at_least_once_on_success_policy_failure__does_not_commit() -> None:
     # Arrange
     ack = FakeAckHandle()
     consumer = FakeConsumer([_message("m-1", ack)])
@@ -277,8 +277,8 @@ async def test__inbox_consumer_runner__at_least_once_on_success_policy_failure__
     finally:
         await runner.stop()
 
-    # Assert
-    assert ack.commit_calls == 1
+    # Assert: a returned failure is a failure, and ON_SUCCESS leaves it to the broker
+    assert ack.commit_calls == 0
 
 
 @pytest.mark.asyncio
@@ -414,8 +414,8 @@ async def test__inbox_consumer_runner__exactly_once_handler_failure__does_not_co
     finally:
         await runner.stop()
 
-    # Assert
-    assert result.processed is True
+    # Assert: rolled back like a raise, so nothing was processed
+    assert result.processed is False
     assert ack.commit_calls == 0
 
 
@@ -449,8 +449,8 @@ async def test__inbox_consumer_runner__at_least_once_on_persist__commits_before_
     finally:
         await runner.stop()
 
-    # Assert
-    assert result.processed is True
+    # Assert: rolled back like a raise, and ON_PERSIST commits after a failed transaction too
+    assert result.processed is False
     assert ack.commit_calls == 1
 
 
@@ -522,7 +522,7 @@ async def test__inbox_consumer_runner__no_handler__persists_event_and_commits() 
 
 
 @pytest.mark.asyncio
-async def test__inbox_consumer_runner__handler_returns_not_processed__event_stays_pending() -> None:
+async def test__inbox_consumer_runner__handler_returns_not_processed__event_marked_completed() -> None:
     # Arrange
     ack = FakeAckHandle()
     consumer = FakeConsumer([_message("m-1", ack)])
@@ -553,7 +553,8 @@ async def test__inbox_consumer_runner__handler_returns_not_processed__event_stay
     assert result.processed is False
     assert ack.commit_calls == 1
     event = next(iter(repo.events.values()))
-    assert event.status == EventStatus.PENDING
+    assert event.status == EventStatus.COMPLETED
+    assert event.locked_by is None
 
 
 @pytest.mark.asyncio

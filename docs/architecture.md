@@ -87,7 +87,7 @@ graph TD
 `InboxConsumerRunner` supports three strategies:
 
 - **`AT_MOST_ONCE`** — commit the broker offset *before* attempting to persist. Lost messages on crash; never duplicated.
-- **`AT_LEAST_ONCE`** — commit after persistence (`ON_PERSIST`) or after a successful handler (`ON_SUCCESS`).
+- **`AT_LEAST_ONCE`** — commit after persistence (`ON_PERSIST`) or after a handler that succeeded or skipped (`ON_SUCCESS`).
 - **`EXACTLY_ONCE_INBOX`** — commit only after persistence + handler succeed (or when a duplicate is detected). Combined with the inbox unique index on `(message_id, consumer_group)` this yields effectively-once processing.
 
 The `exactly_once_commit_on_failed` flag (default `False`) lets you commit even on handler failure when the message is unrecoverable — useful when you rely on DLQ + maintenance to clean up.

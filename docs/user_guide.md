@@ -156,8 +156,9 @@ finally:
 
 The handler runs inside the transaction that inserts the inbox row, and `repo.session` is that
 transaction. Write the side effect through it and the invoice and the inbox row commit
-together — or roll back together when the handler raises. A session the handler opens itself
-is a second transaction and does not get that.
+together — or roll back together when the handler raises or returns `handler_retry(...)`. A
+skip (`handler_skipped()`) completes the row like a success. A session the handler opens
+itself is a second transaction and does not get that.
 
 ### Option B — batch processing already-stored inbox rows
 
