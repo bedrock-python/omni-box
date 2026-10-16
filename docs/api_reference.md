@@ -43,7 +43,7 @@ From `omni_box.core.protocols`.
 
 - **Repositories**: `EventRepository[T]`, `OutboxEventRepository`, `InboxEventRepository`, `FetchFilters`, `RepositoryCapabilities`.
 - **Capabilities**: `SupportsBulkOperations[T]`, `SupportsDistributedLocking[T]`, `SupportsRetentionPolicies`.
-- **Broker**: `EventPublisher`, `EventConsumer`, `ConsumedMessage`, `AckHandle` / `NullAckHandle`, `EnvelopeParser`, `EnvelopeData`, `InboxHandler`.
+- **Broker**: `EventPublisher`, `EventConsumer`, `ConsumedMessage`, `AckHandle` / `NullAckHandle`, `EnvelopeParser`, `EnvelopeData`, `InboxHandler`. `AckHandle` has `commit()` and `rewind()`; `rewind()` is a no-op unless the broker needs it.
 - **Transaction providers**: `InboxTransactionProviderProtocol`, `OutboxTransactionProviderProtocol` (under `omni_box.core.protocols.transaction`).
 - **Metrics**: `InboxMetrics`, `OutboxMetrics`, `ProcessingMetrics` (under `omni_box.core.protocols.metrics`).
 
@@ -130,8 +130,8 @@ InboxConsumerRunner(
 ```
 
 - `start()`, `stop()`
-- `run_forever()` — loops calling `process_one`, applies exponential backoff on errors.
-- `process_one() -> InboxConsumeResult` (`message_id`, `event_id`, `committed`, `processed`, `duplicate`).
+- `run_forever()` — loops calling `process_one`; backs off exponentially (0.1 s to 5 s) after an error or a message it did not commit.
+- `process_one() -> InboxConsumeResult` (`message_id`, `event_id`, `committed`, `processed`, `duplicate`). A message it does not commit is rewound with `AckHandle.rewind()`, so the next call reads it again.
 
 Enums:
 
@@ -204,7 +204,7 @@ All inherit from `OmniBoxError`.
 `omni_box.infra.brokers.kafka`:
 
 - `KafkaEventPublisher(producer, converter, *, max_infra_retries=3)` — built on top of `aiokafka.AIOKafkaProducer`. The caller owns the producer lifecycle (`start`/`stop`). A broker that does not answer — connection and node errors, request and client timeouts, and an unknown topic the broker will not confirm with a metadata refresh either — is retried `max_infra_retries` times and then raised as `TransientError`, which costs the row no attempt. Anything else, including a record the broker rejects, is raised as it is and counts.
-- `KafkaEventConsumer` — wraps `aiokafka.AIOKafkaConsumer` and exposes per-record `AckHandle`s. Use `DefaultEnvelopeParser` or provide your own `EnvelopeParser`.
+- `KafkaEventConsumer` — wraps `aiokafka.AIOKafkaConsumer` and exposes per-record `AckHandle`s: `commit()` commits `offset + 1`, `rewind()` seeks the partition back to the record. Use `DefaultEnvelopeParser` or provide your own `EnvelopeParser`.
 
 Neither adapter depends on any external "kit" package; only `aiokafka` is required.
 

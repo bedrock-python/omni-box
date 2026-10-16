@@ -45,14 +45,21 @@ pytestmark = pytest.mark.unit
 
 
 class _FakeAckHandle(AckHandle):
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, rewind_fails: bool = False) -> None:
         self.commit_count: int = 0
+        self.rewind_count: int = 0
         self.fail: bool = fail
+        self.rewind_fails: bool = rewind_fails
 
     async def commit(self) -> None:
         self.commit_count += 1
         if self.fail:
             raise RuntimeError("commit boom")
+
+    async def rewind(self) -> None:
+        self.rewind_count += 1
+        if self.rewind_fails:
+            raise RuntimeError("rewind boom")
 
 
 class _FakeInboxRepo:
@@ -561,6 +568,295 @@ async def test__inbox_consumer_runner__run_forever_started__loops_until_stopped(
 
     # Assert
     assert iterations == [1]
+
+
+async def test__inbox_consumer_runner__run_forever_uncommitted_message__backs_off_until_it_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange: the consumer hands the same message back after a rewind, as Kafka does
+    ack = _FakeAckHandle()
+    message = _make_message(ack_handle=ack)
+    consumer = _FakeConsumer(messages=[message, message, message, message])
+    calls: list[int] = []
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> None:
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("downstream not ready")
+
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(_FakeInboxRepo()),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("omni_box.application.services.consume.asyncio.sleep", fake_sleep)
+    original = runner.process_one
+
+    async def stop_once_committed() -> InboxConsumeResult:
+        result = await original()
+        if result.committed:
+            await runner.stop()
+        return result
+
+    runner.process_one = stop_once_committed  # type: ignore[method-assign]
+    await runner.start()
+
+    # Act
+    await runner.run_forever()
+
+    # Assert: two failures, each rewound and followed by a longer pause, then the commit
+    assert len(calls) == 3
+    assert ack.rewind_count == 2
+    assert ack.commit_count == 1
+    assert sleeps == [0.1, 0.2]
+
+
+async def test__inbox_consumer_runner__run_forever_committed_message__does_not_back_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message("m1", ack_handle=ack), _make_message("m2", ack_handle=ack)])
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(_FakeInboxRepo()),
+        handler=None,
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("omni_box.application.services.consume.asyncio.sleep", fake_sleep)
+    original = runner.process_one
+    seen: list[str] = []
+
+    async def stop_after_two() -> InboxConsumeResult:
+        result = await original()
+        seen.append(result.message_id)
+        if len(seen) == 2:
+            await runner.stop()
+        return result
+
+    runner.process_one = stop_after_two  # type: ignore[method-assign]
+    await runner.start()
+
+    # Act
+    await runner.run_forever()
+
+    # Assert
+    assert seen == ["m1", "m2"]
+    assert sleeps == []
+    assert ack.rewind_count == 0
+
+
+async def test__inbox_consumer_runner__run_forever_process_one_raises__rewinds_and_backs_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange: the first transaction cannot open, the redelivery goes through
+    ack = _FakeAckHandle()
+    message = _make_message(ack_handle=ack)
+    consumer = _FakeConsumer(messages=[message, message])
+    repo = _FakeInboxRepo()
+    opened: list[int] = []
+
+    class _FlakyTx(_FakeTxProvider):
+        def transaction(self) -> Any:
+            opened.append(1)
+            if len(opened) == 1:
+                raise ConnectionResetError("connection to the database was lost")
+            return super().transaction()
+
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FlakyTx(repo),
+        handler=None,
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("omni_box.application.services.consume.asyncio.sleep", fake_sleep)
+    original = runner.process_one
+
+    async def stop_once_committed() -> InboxConsumeResult:
+        result = await original()
+        if result.committed:
+            await runner.stop()
+        return result
+
+    runner.process_one = stop_once_committed  # type: ignore[method-assign]
+    await runner.start()
+
+    # Act
+    await runner.run_forever()
+
+    # Assert
+    assert ack.rewind_count == 1
+    assert ack.commit_count == 1
+    assert sleeps == [0.1]
+    assert [e.message_id for e in repo.created] == ["m1"]
+
+
+@pytest.mark.parametrize(
+    ("strategy", "policy"),
+    [
+        (AckStrategy.EXACTLY_ONCE_INBOX, CommitOffsetPolicy.ON_PERSIST),
+        (AckStrategy.AT_LEAST_ONCE, CommitOffsetPolicy.ON_SUCCESS),
+    ],
+    ids=["exactly-once", "at-least-once-on-success"],
+)
+async def test__inbox_consumer_runner__handler_error_not_committed__rewinds_the_message(
+    strategy: AckStrategy, policy: CommitOffsetPolicy
+) -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack)])
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> None:
+        raise RuntimeError("boom")
+
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(_FakeInboxRepo()),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+        ack_strategy=strategy,
+        commit_offset_policy=policy,
+    )
+
+    # Act
+    result = await runner.process_one()
+
+    # Assert
+    assert result.committed is False
+    assert ack.commit_count == 0
+    assert ack.rewind_count == 1
+
+
+async def test__inbox_consumer_runner__committed_message__is_not_rewound() -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack)])
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> None:
+        return None
+
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(_FakeInboxRepo()),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+
+    # Act
+    result = await runner.process_one()
+
+    # Assert
+    assert result.committed is True
+    assert ack.rewind_count == 0
+
+
+async def test__inbox_consumer_runner__persist_fails__rewinds_before_raising() -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack)])
+    repo = _FakeInboxRepo(create_raises=RuntimeError("db down"))
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(repo),
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+
+    # Act / Assert
+    with pytest.raises(InboxPersistError):
+        await runner.process_one()
+    assert ack.rewind_count == 1
+    assert ack.commit_count == 0
+
+
+async def test__inbox_consumer_runner__rewind_raises__outcome_is_still_returned() -> None:
+    # Arrange
+    ack = _FakeAckHandle(rewind_fails=True)
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack)])
+
+    async def handler(event: InboxEvent, r: InboxEventRepository) -> None:
+        raise RuntimeError("boom")
+
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(_FakeInboxRepo()),
+        handler=handler,
+        worker_id="w1",
+        consumer_group="cg1",
+    )
+
+    # Act
+    result = await runner.process_one()
+
+    # Assert
+    assert result.committed is False
+    assert ack.rewind_count == 1
+
+
+@pytest.mark.parametrize(
+    ("strategy", "policy"),
+    [
+        (AckStrategy.AT_LEAST_ONCE, CommitOffsetPolicy.ON_PERSIST),
+        (AckStrategy.AT_LEAST_ONCE, CommitOffsetPolicy.ON_SUCCESS),
+        (AckStrategy.EXACTLY_ONCE_INBOX, CommitOffsetPolicy.ON_PERSIST),
+    ],
+    ids=["at-least-once-on-persist", "at-least-once-on-success", "exactly-once"],
+)
+async def test__inbox_consumer_runner__duplicate__committed_under_every_strategy(
+    strategy: AckStrategy, policy: CommitOffsetPolicy
+) -> None:
+    # Arrange
+    ack = _FakeAckHandle()
+    consumer = _FakeConsumer(messages=[_make_message(ack_handle=ack)])
+    runner = InboxConsumerRunner(
+        consumer=consumer,
+        transaction_provider=_FakeTxProvider(_FakeInboxRepo(create_returns_completed=True)),
+        worker_id="w1",
+        consumer_group="cg1",
+        ack_strategy=strategy,
+        commit_offset_policy=policy,
+    )
+
+    # Act
+    result = await runner.process_one()
+
+    # Assert: left uncommitted, a duplicate would be rewound and come back forever
+    assert result.duplicate is True
+    assert result.committed is True
+    assert ack.commit_count == 1
+    assert ack.rewind_count == 0
+
+
+async def test__ack_handle__rewind_default__does_nothing() -> None:
+    # Arrange
+    class _CommitOnly(AckHandle):
+        async def commit(self) -> None:
+            return
+
+    # Act / Assert: a handle written before ``rewind`` existed keeps working
+    await _CommitOnly().rewind()
+    await NullAckHandle().rewind()
 
 
 # -------- InboxConsumerRunner.process_one paths --------

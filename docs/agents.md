@@ -64,8 +64,9 @@ transaction, and it is yours to commit.
 transaction through your `InboxTransactionProviderProtocol`, inserts an `InboxEvent`, runs
 your handler inside that same transaction, and commits the broker offset according to the
 `AckStrategy`. A message already in the table does not insert a second row: the repository
-returns the existing one, and if it is `completed` the runner reports a duplicate and moves
-on. Alternatively, land rows fast with no handler and drain them later with
+returns the existing one, and if it is `completed` the runner reports a duplicate, commits it
+and moves on. A message the runner does not commit is put back with `AckHandle.rewind()`, so
+the next read is that message again, not the one after it. Alternatively, land rows fast with no handler and drain them later with
 `create_inbox_processor` — the same fetch/lock/process/commit cycle the outbox uses.
 
 **The cycle** underneath both batch paths is `EventBatchProcessor.process_batch`:
@@ -292,8 +293,19 @@ Commit semantics, exactly as the runner implements them:
 |---|---|
 | `AT_MOST_ONCE` | before the transaction is even attempted |
 | `AT_LEAST_ONCE` + `ON_PERSIST` | after the transaction, success or failure |
-| `AT_LEAST_ONCE` + `ON_SUCCESS` | only when the handler returned a result with `processed=True` |
+| `AT_LEAST_ONCE` + `ON_SUCCESS` | only when the handler returned a result with `processed=True`, or the row was already `completed` |
 | `EXACTLY_ONCE_INBOX` | when there is no handler, when the handler succeeded, when it skipped, or when the row was already `completed` — and on a handler exception only if `exactly_once_commit_on_failed=True`. Not when another worker held the row's lock: the handler did not run, so the message is left for redelivery |
+
+A message that is not committed — `committed=False`, or `process_one()` raised after reading
+it — is rewound: `process_one()` calls `AckHandle.rewind()` before it returns, and the next
+`getone()` hands out the same message again. On Kafka that is a seek back to the record's
+offset; without it the next commit would acknowledge the failed record too, since a Kafka
+commit covers every earlier offset on the partition. `run_forever()` backs off between such
+retries, from 0.1 s doubling to 5 s, so a message that keeps failing holds its partition and
+is retried every 5 s until the handler is fixed or `exactly_once_commit_on_failed=True` lets
+it through. If you drive `process_one()` from your own loop, back off after `committed=False`
+too. `AckHandle.rewind()` does nothing by default; a custom `EventConsumer` for a broker where
+a commit covers earlier messages must implement it.
 
 ### Factories (`omni_box.application.factories`)
 
@@ -389,7 +401,10 @@ attempt. Everything else, a record the broker rejects or a topic it says it does
 included, is raised as it is and counts.
 `KafkaEventConsumer(consumer, *, payload_loader=None, message_id_getter=None,
 event_type_getter=None, source_getter=None, envelope_parser=None)` — you own the
-`AIOKafkaConsumer` and should set `enable_auto_commit=False`. Without a
+`AIOKafkaConsumer` and should set `enable_auto_commit=False`. Its ack handle commits
+`offset + 1` and rewinds by seeking the partition back to the record, if the partition is
+still assigned. A record whose payload cannot be decoded raises out of `getone()` before
+there is a handle, and is not rewound. Without a
 `message_id_getter` the message id is the `message_id` or `event_id` header, falling back
 to `"{topic}:{partition}:{offset}"`.
 
@@ -443,7 +458,8 @@ base of the two protocols, not a third implementation. `EventBatchProcessor` set
    inserted on. A session the handler opens itself is a second transaction: its writes
    survive a rollback of the row, and the redelivery does them again. The runner takes the
    row's lock first and only runs the handler if it got it; when someone else holds it you
-   get `processed=False, duplicate=False, committed=False` and the broker redelivers.
+   get `processed=False, duplicate=False, committed=False`. In both cases the runner rewinds
+   the message, so the next read is that message again rather than the one after it.
 5. **The runner never records a failure.** It calls neither `mark_failed` nor anything that
    increments `attempts_made`, so `max_attempts` does nothing on that path. The retry budget
    only exists for the batch processors (`create_*_processor`, `EventBatchProcessor`).

@@ -144,6 +144,34 @@ class TestKafkaCommitAckHandle:
 
         consumer.commit.assert_awaited_once_with({TopicPartition("my-topic", 2): 6})
 
+    @pytest.mark.asyncio
+    async def test__rewind__assigned_partition__seeks_back_to_the_record(self) -> None:
+        # Arrange
+        from aiokafka import TopicPartition
+
+        consumer = MagicMock()
+        consumer.assignment.return_value = {TopicPartition("my-topic", 2)}
+        handle = _KafkaCommitAckHandle(consumer, _make_record(topic="my-topic", partition=2, offset=5))
+
+        # Act
+        await handle.rewind()
+
+        # Assert
+        consumer.seek.assert_called_once_with(TopicPartition("my-topic", 2), 5)
+
+    @pytest.mark.asyncio
+    async def test__rewind__partition_no_longer_assigned__leaves_it_to_the_new_owner(self) -> None:
+        # Arrange
+        consumer = MagicMock()
+        consumer.assignment.return_value = set()
+        handle = _KafkaCommitAckHandle(consumer, _make_record(topic="my-topic", partition=2, offset=5))
+
+        # Act
+        await handle.rewind()
+
+        # Assert
+        consumer.seek.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # KafkaEventConsumer — lifecycle

@@ -95,14 +95,14 @@ A consecutive success resets the breaker.
 - **Symptom**: Kafka offsets advance but `inbox_events` is empty.
   Likely cause: `ack_strategy=AT_MOST_ONCE` combined with a persistence failure. Switch to `AT_LEAST_ONCE` (with `commit_offset_policy=ON_PERSIST`) or `EXACTLY_ONCE_INBOX`.
 
-- **Symptom**: Kafka offsets do not advance even though rows are written.
-  Likely cause: `EXACTLY_ONCE_INBOX` + a failing handler. The runner only commits after success unless `exactly_once_commit_on_failed=True`. Decide whether the failure is recoverable and pick the appropriate flag.
+- **Symptom**: Kafka offsets do not advance on one partition, and the log repeats `Inbox message not committed; it will be redelivered after a backoff` for the same `message_id`.
+  Likely cause: `EXACTLY_ONCE_INBOX` (or `AT_LEAST_ONCE` + `ON_SUCCESS`) and a handler that keeps failing on that message. The runner does not commit it, rewinds it and retries it every few seconds, up to 5 s apart, so the messages behind it on the partition wait. Fix the handler, or set `exactly_once_commit_on_failed=True` if a failed message may be acknowledged and dropped.
 
 - **Symptom**: the handler's side effect is in the database but the inbox row is not — or the effect appears twice after a redelivery.
   Likely cause: the handler opened a session of its own. Write through `repo.session`, the transaction the inbox row is in; the two then commit together, or roll back together when the handler raises.
 
 - **`InboxPersistError` thrown by `process_one`**.
-  Indicates the per-message transaction was rolled back (DB outage, integrity violation, lock conflict). The offset is intentionally not committed so the broker can redeliver. Check the cause via `error.cause`.
+  Indicates the per-message transaction was rolled back (DB outage, integrity violation, lock conflict). The offset is intentionally not committed, and the message is rewound, so the next `process_one()` reads it again; `run_forever()` backs off before it does. Check the cause via `error.cause`.
 
 ## 6. Performance tuning
 

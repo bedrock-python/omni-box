@@ -205,9 +205,10 @@ class InboxConsumerRunner:
         self._semaphore = asyncio.Semaphore(concurrency_limit) if concurrency_limit else None
         self._running = False
         self._lifecycle_lock = asyncio.Lock()
-        # Backoff used when ``process_one`` raises while ``run_forever`` is
-        # active. Caps the loop's retry rate so an external outage can't burn
-        # CPU.
+        # Backoff used while ``run_forever`` gets a message it cannot commit,
+        # whether ``process_one`` raised or returned ``committed=False``. The
+        # message was rewound, so the next read is the same message again; the
+        # backoff spaces those retries out.
         self._run_forever_min_backoff = 0.1
         self._run_forever_max_backoff = 5.0
 
@@ -226,22 +227,44 @@ class InboxConsumerRunner:
             await self._consumer.stop()
 
     async def run_forever(self) -> None:
+        """Process messages until ``stop()``.
+
+        A message that is not committed is rewound by ``process_one`` and comes
+        back on the next read, so a handler that keeps failing holds its partition
+        rather than being read past. The loop backs off exponentially, from 0.1 s
+        to 5 s, for as long as messages are not committed.
+        """
         if not self._running:
             raise RuntimeError("Runner is not started.")
         backoff = self._run_forever_min_backoff
         while self._running:
             try:
-                await self.process_one()
+                result = await self.process_one()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("InboxConsumerRunner.process_one failed; backing off")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, self._run_forever_max_backoff)
             else:
-                backoff = self._run_forever_min_backoff
+                if result.committed:
+                    backoff = self._run_forever_min_backoff
+                    continue
+                logger.warning(
+                    "Inbox message not committed; it will be redelivered after a backoff",
+                    message_id=result.message_id,
+                    backoff_seconds=backoff,
+                )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, self._run_forever_max_backoff)
 
     async def process_one(self) -> InboxConsumeResult:
+        """Read one message, process it and commit it according to ``ack_strategy``.
+
+        A message that is not committed — the result says ``committed=False``, or
+        this method raises after reading it — is rewound through
+        ``AckHandle.rewind()``, so the next call returns the same message. A
+        caller driving this method in its own loop should back off before calling
+        it again after such a result, as ``run_forever`` does.
+        """
         if self._semaphore:
             async with self._semaphore:
                 return await self._process_one_internal()
@@ -251,6 +274,23 @@ class InboxConsumerRunner:
         message = await self._consumer.getone()
         self._metrics.inc_consumed()
         ack_handle = message.ack_handle or NullAckHandle()
+        try:
+            result = await self._process_message(message, ack_handle)
+        except BaseException:
+            await self._rewind(message, ack_handle)
+            raise
+        if not result.committed:
+            await self._rewind(message, ack_handle)
+        return result
+
+    async def _rewind(self, message: ConsumedMessage, ack_handle: AckHandle) -> None:
+        """Put an uncommitted message back, without masking the outcome that led here."""
+        try:
+            await ack_handle.rewind()
+        except Exception:
+            logger.exception("Failed to rewind an uncommitted inbox message", message_id=message.message_id)
+
+    async def _process_message(self, message: ConsumedMessage, ack_handle: AckHandle) -> InboxConsumeResult:
         committed = False
 
         if self._ack_strategy == AckStrategy.AT_MOST_ONCE:
@@ -293,7 +333,9 @@ class InboxConsumerRunner:
             message_id=message.message_id,
             event_type=stored.event_type,
         )
-        if self._ack_strategy == AckStrategy.EXACTLY_ONCE_INBOX and not committed:
+        # Whatever the strategy, the message is done: left uncommitted it would be
+        # rewound and redelivered forever.
+        if not committed:
             await self._commit_with_metrics(ack_handle)
             committed = True
         self._metrics.inc_duplicate(event_type=stored.event_type)
