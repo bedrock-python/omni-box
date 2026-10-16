@@ -65,6 +65,7 @@ async def test__handler_execution_step__handler_times_out__marks_failed_with_tim
 
     event = MagicMock()
     event.id = uuid4()
+    event.attempts_made = 0
     context = MagicMock(spec=ProcessingContext)
     context.repo = MagicMock()
 
@@ -87,6 +88,7 @@ async def test__handler_execution_step__handler_raises_exception__marks_failed_w
 
     event = MagicMock()
     event.id = uuid4()
+    event.attempts_made = 0
     context = MagicMock(spec=ProcessingContext)
     context.repo = MagicMock()
 

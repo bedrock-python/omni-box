@@ -82,7 +82,14 @@ CREATE UNIQUE INDEX idx_outbox_events_idempotency_key
 
 CREATE INDEX idx_outbox_events_created_at ON outbox_events (created_at);
 CREATE INDEX idx_outbox_events_updated_at ON outbox_events (updated_at);
+
+-- Per-key order: the fetch looks for an earlier pending event of the same key.
+CREATE INDEX idx_outbox_events_pending_key_order
+    ON outbox_events (topic, partition_key, created_at)
+    WHERE status = 'pending';
 ```
+
+On an existing table add the last index with `CREATE INDEX CONCURRENTLY` (in Alembic, inside `op.get_context().autocommit_block()`); the partitioned base calls it `idx_outbox_events_p_pending_key_order`. The relay keeps working without it, but every fetch then scans the table.
 
 ## Inbox table
 
