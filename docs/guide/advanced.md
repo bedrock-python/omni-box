@@ -69,5 +69,6 @@ Because `DLQStep` is best-effort, the unique key keeps replays from inflating th
 
 - `EventPublisher` — `async def publish(event, repo)`.
 - `EventConsumer` — `start`, `stop`, `async def getone() -> ConsumedMessage`.
+- `AckHandle` — attached to each `ConsumedMessage`: `async def commit()`, and `async def rewind()`, which the runner calls on a message it does not commit. The default `rewind()` does nothing, which suits a broker that redelivers an unacknowledged message by itself (RabbitMQ after a `nack` with requeue, SQS after the visibility timeout). Where a commit acknowledges every earlier message, as a Kafka offset does, `rewind()` must make the next `getone()` return this message again, or the next commit loses it.
 
 Implement those for RabbitMQ, Pulsar, NATS, etc. The Kafka adapter is just a reference implementation; nothing about the core pipeline assumes Kafka.

@@ -52,7 +52,7 @@ class DefaultEnvelopeParser(EnvelopeParser):
 
 
 class _KafkaCommitAckHandle(AckHandle):
-    """Per-record commit handle (commits ``record.offset + 1`` for its topic-partition)."""
+    """Per-record handle: commits ``record.offset + 1`` for its topic-partition, rewinds to ``record.offset``."""
 
     def __init__(self, consumer: AIOKafkaConsumer, record: ConsumerRecord) -> None:
         self._consumer = consumer
@@ -61,6 +61,16 @@ class _KafkaCommitAckHandle(AckHandle):
     async def commit(self) -> None:
         tp = TopicPartition(self._record.topic, self._record.partition)
         await self._consumer.commit({tp: self._record.offset + 1})
+
+    async def rewind(self) -> None:
+        """Seek the partition back to this record, so the next fetch returns it again.
+
+        A partition that is no longer assigned is left alone: whoever owns it now
+        starts from the committed offset, which is this record or an earlier one.
+        """
+        tp = TopicPartition(self._record.topic, self._record.partition)
+        if tp in self._consumer.assignment():
+            self._consumer.seek(tp, self._record.offset)
 
 
 class KafkaEventConsumer(EventConsumer):

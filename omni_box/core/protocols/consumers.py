@@ -36,6 +36,19 @@ class AckHandle(ABC):
         """Commit/acknowledge the consumed message."""
         ...
 
+    async def rewind(self) -> None:
+        """Make the broker deliver this message again.
+
+        ``InboxConsumerRunner`` calls it whenever it does not commit the message,
+        so that the next ``getone()`` returns it rather than the one after it. On a
+        broker where a commit acknowledges everything before it (a Kafka offset), a
+        message that is read past is lost the moment a later one commits.
+
+        The default does nothing, which is right for a broker that redelivers an
+        unacknowledged message on its own.
+        """
+        return
+
 
 class NullAckHandle(AckHandle):
     """No-op ack handle."""
