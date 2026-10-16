@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ..core.constants import (
+    DEFAULT_BACKOFF_BASE_SECONDS,
+    DEFAULT_BACKOFF_CAP_SECONDS,
     DEFAULT_PROCESS_TIMEOUT_SECONDS,
     DEFAULT_PUBLISH_TIMEOUT_SECONDS,
 )
@@ -42,6 +44,8 @@ def create_inbox_processor(
     skip_duplicate_siblings: bool = True,
     filter_sources: list[str] | None = None,
     process_timeout: float = DEFAULT_PROCESS_TIMEOUT_SECONDS,
+    retry_backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
+    retry_backoff_cap_seconds: float = DEFAULT_BACKOFF_CAP_SECONDS,
     metrics: InboxMetrics | None = None,
     dlq_storage: DLQStorage[InboxEvent] | None = None,
     enable_otel: bool = False,
@@ -79,7 +83,14 @@ def create_inbox_processor(
     if skip_duplicate_siblings:
         builder.add_step(SiblingDeduplicationStep(enabled=True))
 
-    builder.add_step(HandlerExecutionStep(handler, timeout=process_timeout))  # type: ignore[arg-type]
+    builder.add_step(
+        HandlerExecutionStep(
+            handler,  # type: ignore[arg-type]
+            timeout=process_timeout,
+            retry_backoff_base_seconds=retry_backoff_base_seconds,
+            retry_backoff_cap_seconds=retry_backoff_cap_seconds,
+        )
+    )
 
     if additional_steps_after:
         for step in additional_steps_after:
@@ -97,6 +108,8 @@ def create_outbox_processor(
     publisher: EventPublisher,
     *,
     publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT_SECONDS,
+    retry_backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
+    retry_backoff_cap_seconds: float = DEFAULT_BACKOFF_CAP_SECONDS,
     metrics: OutboxMetrics | None = None,
     dlq_storage: DLQStorage[OutboxEvent] | None = None,
     enable_otel: bool = False,
@@ -128,7 +141,14 @@ def create_outbox_processor(
         for step in additional_steps_before:
             builder.add_step(step)
 
-    builder.add_step(PublisherExecutionStep(publisher.publish, timeout=publish_timeout))
+    builder.add_step(
+        PublisherExecutionStep(
+            publisher.publish,
+            timeout=publish_timeout,
+            retry_backoff_base_seconds=retry_backoff_base_seconds,
+            retry_backoff_cap_seconds=retry_backoff_cap_seconds,
+        )
+    )
 
     if additional_steps_after:
         for step in additional_steps_after:
@@ -148,6 +168,8 @@ def create_dispatching_processor(
     filter_sources: list[str] | None = None,
     skip_duplicate_siblings: bool = True,
     process_timeout: float = DEFAULT_PROCESS_TIMEOUT_SECONDS,
+    retry_backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
+    retry_backoff_cap_seconds: float = DEFAULT_BACKOFF_CAP_SECONDS,
     dependencies: dict[str, object] | None = None,
     metrics: InboxMetrics | None = None,
     dlq_storage: DLQStorage[InboxEvent] | None = None,
@@ -188,7 +210,14 @@ def create_dispatching_processor(
     if skip_duplicate_siblings:
         builder.add_step(SiblingDeduplicationStep(enabled=True))
 
-    builder.add_step(HandlerExecutionStep(dispatch_handler, timeout=process_timeout))  # type: ignore[arg-type]
+    builder.add_step(
+        HandlerExecutionStep(
+            dispatch_handler,  # type: ignore[arg-type]
+            timeout=process_timeout,
+            retry_backoff_base_seconds=retry_backoff_base_seconds,
+            retry_backoff_cap_seconds=retry_backoff_cap_seconds,
+        )
+    )
 
     if additional_steps_after:
         for step in additional_steps_after:

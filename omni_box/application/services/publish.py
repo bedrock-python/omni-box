@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Unpack
 import structlog
 
 from ...core.constants import (
+    DEFAULT_BACKOFF_BASE_SECONDS,
+    DEFAULT_BACKOFF_CAP_SECONDS,
     DEFAULT_PUBLISH_TIMEOUT_SECONDS,
 )
 from ...core.services.metrics import NoOpOutboxMetrics
@@ -39,6 +41,8 @@ class OutboxPublisher:
         metrics: OutboxMetrics | None = None,
         publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT_SECONDS,
         concurrency_limit: int | None = None,
+        retry_backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
+        retry_backoff_cap_seconds: float = DEFAULT_BACKOFF_CAP_SECONDS,
     ) -> None:
         self._repo = repo
         self._broker = broker
@@ -49,6 +53,8 @@ class OutboxPublisher:
             metrics=self._metrics,
             job_name="outbox_publisher",
             publish_timeout=publish_timeout,
+            retry_backoff_base_seconds=retry_backoff_base_seconds,
+            retry_backoff_cap_seconds=retry_backoff_cap_seconds,
         )
         self._semaphore = asyncio.Semaphore(concurrency_limit) if concurrency_limit else None
 

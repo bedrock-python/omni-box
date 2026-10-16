@@ -97,6 +97,15 @@ it says it does not have, is about the row and still spends an attempt — that 
 `max_attempts` and `failed` are for. Raise `TransientError` from your own publisher or handler
 to get the same treatment.
 
+**Retries and order.** A counted failure is retried after an exponential backoff — 5–10 s,
+then twice that, up to `retry_backoff_cap_seconds` — so the six default attempts span minutes
+rather than six cycles; pass `retry_backoff_base_seconds=0` to `OutboxPublisher` to retry on the
+next cycle. The relay keeps the order of each `(topic, partition_key)`: it publishes a key's
+events one per cycle in the order they were written, and a failed event holds back the ones
+behind it until it goes out. A delayed event (`scheduled_at` in the future) does not, and a
+`failed` one is skipped. The fetch needs the index `idx_outbox_events_pending_key_order`;
+see [Migrations](migrations.md).
+
 ## Transactional Inbox
 
 ### Option A — drive consumption with `InboxConsumerRunner`
@@ -172,8 +181,10 @@ async with session_factory() as session, session.begin():    # the commit is you
 ```
 
 The batch processor owns the retry budget: a handler that fails leaves the row `pending` with
-`attempts_made + 1` until `max_attempts`, which is why draining rows here — rather than in the
-runner's handler — is how you get retries out of the table.
+`attempts_made + 1` until `max_attempts`, retried after an exponential backoff
+(`retry_backoff_base_seconds=10.0`, `retry_backoff_cap_seconds=3600.0` on the factory), which is
+why draining rows here — rather than in the runner's handler — is how you get retries out of
+the table.
 
 ### Option C — automated event routing
 

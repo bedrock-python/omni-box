@@ -13,6 +13,7 @@ from sqlalchemy import bindparam, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from omni_box.core.constants import (
     DEFAULT_SCHEDULE_AT_SKEW_SECONDS,
@@ -65,6 +66,10 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
     SupportsRetentionPolicies,
 ):
     """Generic PostgreSQL implementation of EventRepository."""
+
+    # Columns whose events must be handed out in the order they were written. Empty
+    # means no order is kept between rows; the outbox repository sets its broker key.
+    _ordering_key_columns: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -294,13 +299,14 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
     ) -> None:
         try:
             truncated_err = self._truncate_error(error)
-            now = func.now()
             values: dict[str, Any] = {
                 "last_error": truncated_err,
-                "scheduled_at": next_retry_at or now,
                 "locked_at": None,
                 "locked_by": None,
             }
+            # Without a time the row keeps its schedule, as in ``bulk_mark_failed``.
+            if next_retry_at is not None:
+                values["scheduled_at"] = next_retry_at
             if count_as_attempt:
                 new_attempts = self._model_class.attempts_made + 1
                 values["attempts_made"] = new_attempts
@@ -508,6 +514,8 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
                 .where(self._model_class.attempts_made < self._model_class.max_attempts)
             )
             subq_stmt = self._apply_filters(subq_stmt, filters)
+            if self._ordering_key_columns:
+                subq_stmt = subq_stmt.where(~self._earlier_event_in_line(now))
             subq = (
                 subq_stmt.order_by(self._model_class.scheduled_at, self._model_class.created_at, self._model_class.id)
                 .limit(limit)
@@ -525,6 +533,27 @@ class PostgresEventRepository[T: BaseEvent, M: EventMixin](
             raise StorageError(f"Postgres: fetch-and-lock error: {e}") from e
         else:
             return [self._to_entity(event) for event in result.scalars().all()]
+
+    def _earlier_event_in_line(self, now: sa.ColumnElement[datetime]) -> sa.Exists:
+        """An earlier pending row of the same key that the row has to wait for.
+
+        That row is due, or has been tried and waits for its retry, or is held by
+        a worker. So only the head of each key is handed out, and a key's events
+        go out one after the other, across workers too: while one worker holds the
+        head, the row behind it is not a head for anyone else. A row scheduled for
+        later and never tried does not hold its key up, so a delayed event does not
+        delay the events written after it. A ``failed`` row is not pending, and its
+        successors go out without it.
+        """
+        row = self._model_class
+        earlier = aliased(self._model_class)
+        return (
+            sa.exists()
+            .where(*(getattr(earlier, column) == getattr(row, column) for column in self._ordering_key_columns))
+            .where(earlier.status == EventStatus.PENDING)
+            .where(sa.tuple_(earlier.created_at, earlier.id) < sa.tuple_(row.created_at, row.id))
+            .where(or_(earlier.scheduled_at <= now, earlier.last_error.is_not(None), earlier.locked_at.is_not(None)))
+        )
 
     async def refresh_lock(self, event_id: UUID, worker_id: str) -> bool:
         try:

@@ -174,6 +174,17 @@ def get_event_constraints(
     )
 
 
+def _outbox_ordering_index(table_name: str) -> Index:
+    """The index behind the outbox fetch's per-key order: an earlier pending row of the same key."""
+    return Index(
+        f"idx_{table_name}_pending_key_order",
+        "topic",
+        "partition_key",
+        "created_at",
+        postgresql_where=text(f"status = '{EventStatus.PENDING.value}'"),
+    )
+
+
 class OutboxEventDBBase(EventMixin, OutboxColumnsMixin):
     """Abstract base for standard outbox table."""
 
@@ -182,7 +193,10 @@ class OutboxEventDBBase(EventMixin, OutboxColumnsMixin):
 
     @declared_attr.directive
     def __table_args__(self) -> tuple:
-        return get_event_constraints("outbox_events", metadata=self.metadata)
+        return (
+            *get_event_constraints("outbox_events", metadata=self.metadata),
+            _outbox_ordering_index("outbox_events"),
+        )
 
 
 class InboxEventDBBase(EventMixin, InboxColumnsMixin):
@@ -228,6 +242,7 @@ class OutboxEventPartitionedDBBase(EventMixin, OutboxColumnsMixin):
     def __table_args__(self) -> tuple:
         return (
             *get_event_constraints("outbox_events_p", include_created_at_in_unique=True, metadata=self.metadata),
+            _outbox_ordering_index("outbox_events_p"),
             {"postgresql_partition_by": "RANGE (created_at)"},
         )
 

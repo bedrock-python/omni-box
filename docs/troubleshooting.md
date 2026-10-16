@@ -52,6 +52,17 @@ Inbox rows are deduplicated by **`(message_id, consumer_group)`** (the unique in
 - `count_as_attempt=True` (default) — bumps `attempts_made`. Once it reaches `max_attempts`, the row transitions to `failed` and is no longer fetched.
 - `count_as_attempt=False` — does **not** bump the counter; intended for transient infrastructure errors (broker hiccup, DB timeout). You must provide `next_retry_at`.
 
+**When a counted retry happens.** A counted failure that does not say when to retry — an exception, a handler timeout, a `handler_retry()` without `next_retry_at` — is put back with an exponential backoff: `retry_backoff_base_seconds * 2 ** attempts_made`, capped at `retry_backoff_cap_seconds`, with equal jitter (somewhere between half of that and all of it). With the defaults (10 s, 3600 s, `max_attempts=6`) the five retries come after 5–10 s, 10–20 s, 20–40 s, 40–80 s and 80–160 s, so a row reaches `failed` 2.5 to 5 minutes after its first failure, however busy the relay is. An explicit `next_retry_at` wins. `retry_backoff_base_seconds=0` on the factory or on `OutboxPublisher` retries on the next cycle instead. While it waits the row is `pending` with a `scheduled_at` in the future:
+
+```sql
+SELECT id, attempts_made, scheduled_at - now() AS retry_in, last_error
+FROM outbox_events
+WHERE status = 'pending' AND attempts_made > 0
+ORDER BY scheduled_at;
+```
+
+On the outbox, the events written after it with the same `topic` and `partition_key` wait with it (see "Event order" below).
+
 The `DLQStep` only considers counted failures: a transient error never routes a row to DLQ even if it superficially looks like it crossed the threshold. The DLQ move itself is **best-effort** — it runs outside the commit transaction and a failure during `move_to_dlq` is logged and swallowed. Pair the step with an idempotent sink (e.g. Kafka with a unique key) to avoid duplicates on replay.
 
 ### The attempt budget is for the row, not for the outage
@@ -67,6 +78,16 @@ GROUP BY 1, 2 ORDER BY 1, 2;
 ```
 
 When the broker answers again the next cycle publishes the backlog. `requeue_failed` stays what it always was: the operator's tool for rows that genuinely poisoned themselves, not the way out of an outage.
+
+### Event order
+
+`PostgresOutboxRepository.fetch_and_lock_pending` hands out the events of one `(topic, partition_key)` in the order they were written (`created_at`), one per cycle, and across any number of relays: it only takes the *head* of each key, the earliest pending event that nothing in front of it is waiting for. A key's next event waits while the one before it is due, is held by a relay, or failed and waits for its retry — a failed row holds its whole key back until it is published. Keys are independent, and a batch still carries the heads of up to `batch_size` keys.
+
+Two exceptions, both deliberate. An event scheduled for later (`scheduled_at` in the future) that has never been tried does not hold back the events written after it — delaying an event is not a reason to delay its aggregate. And a `failed` row is terminal: its successors go out without it, and `requeue_failed` sends it later, out of order. Alert on `failed` rows if that matters to your consumers.
+
+Symptom: one aggregate's events stop while others flow, and the oldest pending row of that key has `attempts_made > 0` and a future `scheduled_at`. That is the order guarantee at work; fix the cause of the failure, or let it run out its budget.
+
+The fetch looks up a key's earlier pending events through the partial index `idx_outbox_events_pending_key_order` on `(topic, partition_key, created_at) WHERE status = 'pending'` (see [Migrations](migrations.md)). Without it every fetch scans the table.
 
 Inspect genuinely failed rows directly:
 

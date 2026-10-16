@@ -58,7 +58,10 @@ frozen Pydantic model with `status=PENDING`. You insert it through an
 or neither does. Later, in a different transaction, `OutboxPublisher.publish_batch(...)`
 runs one cycle: **fetch and lock** pending rows, **publish** each through an
 `EventPublisher`, **commit** the outcomes back to the rows. All three are one database
-transaction, and it is yours to commit.
+transaction, and it is yours to commit. The PostgreSQL fetch hands out only the head of each
+`(topic, partition_key)`, so a key's events go out one per cycle in the order they were
+written, across any number of relays, and a failed one holds back the rest of its key until
+it is published (rule 20).
 
 **Inbox.** `InboxConsumerRunner` pulls one message from an `EventConsumer`, opens a
 transaction through your `InboxTransactionProviderProtocol`, inserts an `InboxEvent`, runs
@@ -276,7 +279,7 @@ match or the `capabilities` flags.
 
 | Class | Constructor | Methods |
 |---|---|---|
-| `OutboxPublisher` | `(repo, broker, metrics=None, publish_timeout=30.0, concurrency_limit=None)` | `publish_batch(worker_id, batch_size, shutdown_requested_func=None, **fetch_filters) -> BatchProcessingResult` |
+| `OutboxPublisher` | `(repo, broker, metrics=None, publish_timeout=30.0, concurrency_limit=None, retry_backoff_base_seconds=10.0, retry_backoff_cap_seconds=3600.0)` | `publish_batch(worker_id, batch_size, shutdown_requested_func=None, **fetch_filters) -> BatchProcessingResult` |
 | `InboxConsumerRunner` | `(consumer, transaction_provider, handler=None, *, worker_id, consumer_group, domain_service=None, ack_strategy=EXACTLY_ONCE_INBOX, commit_offset_policy=ON_PERSIST, exactly_once_commit_on_failed=False, process_timeout=30.0, concurrency_limit=None, metrics=None)` | `start()`, `stop()`, `run_forever()`, `process_one() -> InboxConsumeResult` |
 | `OmniBoxMaintenanceService` | `(repo)` | `release_stale_locks(stale_timeout_seconds) -> int`, `cleanup_old_events(retention_days, batch_size=1000, max_iterations=10000) -> int` |
 | `EventBatchProcessor` | built by the factories or the builder | `process_batch(worker_id, batch_size, shutdown_requested_func=None, **fetch_filters)` |
@@ -300,7 +303,8 @@ Commit semantics, exactly as the runner implements them:
 All three return an `EventBatchProcessor` and share `metrics=None`, `dlq_storage=None`,
 `enable_otel=False`, `enable_circuit_breaker=False`,
 `circuit_breaker_failure_threshold=5`, `circuit_breaker_recovery_timeout=60`, `job_name`,
-`additional_steps_before=None`, `additional_steps_after=None`.
+`additional_steps_before=None`, `additional_steps_after=None`, and the counted-retry backoff
+`retry_backoff_base_seconds=10.0`, `retry_backoff_cap_seconds=3600.0` (rule 9).
 
 * `create_outbox_processor(repo, publisher, *, publish_timeout=30.0, …)`
 * `create_inbox_processor(repo, handler, *, skip_duplicate_siblings=True, filter_sources=None, process_timeout=30.0, …)`
@@ -322,7 +326,7 @@ event, `StepResult.stop()` ends the whole batch.
 
 | Step (`omni_box.core.pipeline.steps`) | What it does |
 |---|---|
-| `HandlerExecutionStep(handler, timeout=30.0)` | awaits the handler, turns the outcome into `mark_completed` / `mark_failed` / `mark_skipped` on the context. Every processor needs one. A `TransientError` out of the handler is recorded without spending an attempt; a timeout counts |
+| `HandlerExecutionStep(handler, timeout=30.0, *, retry_backoff_base_seconds=10.0, retry_backoff_cap_seconds=3600.0)` | awaits the handler, turns the outcome into `mark_completed` / `mark_failed` / `mark_skipped` on the context. Every processor needs one. A `TransientError` out of the handler is recorded without spending an attempt; a timeout counts. A counted failure with no `next_retry_at` of its own is rescheduled after the backoff of rule 9 |
 | `PublisherExecutionStep(publish, timeout=30.0)` | the outbox's handler step, installed by `create_outbox_processor`. A `TransientError` **or a timeout** is recorded without spending an attempt, and it ends this cycle's publishing: the rest of the batch is recorded the same way, unpublished and unrescheduled, so one dead broker costs one probe per cycle |
 | `SiblingDeduplicationStep(enabled=True)` | skips the event when a *completed* row shares its `(message_id, consumer_group)`. Inbox only |
 | `MetricsStep(metrics)` | emits counters and durations at `on_batch_end` |
@@ -460,7 +464,13 @@ base of the two protocols, not a third implementation. `EventBatchProcessor` set
 9. **`attempts_made == max_attempts` means `failed`, and `failed` is terminal.** The default
    budget is 6. `fetch_pending` and `fetch_and_lock_pending` both filter on
    `attempts_made < max_attempts`, so a failed row is never picked up again;
-   `PostgresEventRepository.requeue_failed(event_id)` resets it.
+   `PostgresEventRepository.requeue_failed(event_id)` resets it. A counted failure is retried
+   after `retry_backoff_base_seconds * 2 ** attempts_made`, capped at
+   `retry_backoff_cap_seconds`, with equal jitter (half of that to all of it): with the
+   defaults the budget runs out 2.5 to 5 minutes after the first failure, not six cycles
+   later. An explicit `next_retry_at` wins; `retry_backoff_base_seconds=0` retries on the next
+   cycle. `mark_failed` and `bulk_mark_failed` both leave `scheduled_at` alone when given no
+   `next_retry_at`.
 10. **`create()` returns the row that is in the table.** On a duplicate — the same
     `(message_id, consumer_group)`, or the same `idempotency_key` — you get the *existing*
     row back, with its own `id` and status, and no exception. Compare
@@ -496,7 +506,10 @@ base of the two protocols, not a third implementation. `EventBatchProcessor` set
     Give the sink an idempotent key.
 17. **The tables are yours.** No `Base`, no migrations, no DDL. Bind the abstract bases to
     your `DeclarativeBase` and generate the migration yourself; the repositories depend on the
-    column names, so keep them. The check constraints are named `ck_<table>_<rule>` unless
+    column names, so keep them. The outbox fetch also depends on the partial index
+    `idx_outbox_events_pending_key_order` (`idx_outbox_events_p_pending_key_order` on the
+    partitioned base) on `(topic, partition_key, created_at) WHERE status = 'pending'`:
+    without it every fetch scans the table. The check constraints are named `ck_<table>_<rule>` unless
     your `MetaData` has a `ck` naming convention with `%(constraint_name)s` in it — then the
     bases hand it the bare rule (`attempts_valid`, …) and the convention names them, so nothing
     runs past PostgreSQL's 63 bytes. Composing `__table_args__` yourself, pass
@@ -508,6 +521,15 @@ base of the two protocols, not a third implementation. `EventBatchProcessor` set
     `release_lock` to clear. The event in flight always runs to completion.
 19. **There is no scheduler.** The relay loop, its sleep, its shutdown and the maintenance
     cadence are yours to write.
+20. **The outbox keeps order per `(topic, partition_key)`, by `created_at`.**
+    `PostgresOutboxRepository.fetch_and_lock_pending` takes only the head of each key — the
+    earliest pending row that no earlier row of its key is waiting in front of because it is
+    due, held by a relay, or failed and waiting for its retry. One event per key per cycle,
+    the heads of up to `batch_size` keys per batch, and the same across relays. An event
+    scheduled for later that was never tried does not hold its key back, and a `failed` row
+    does not either: its successors go out without it, and `requeue_failed` sends it out of
+    order. Two transactions writing the same key at the same time have no order between them;
+    serialize them on the aggregate, as you would anyway.
 
 ## Common mistakes
 

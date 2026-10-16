@@ -77,7 +77,7 @@ Fluent builder. Picks `DistributedLockingFetchStrategy` + `BulkCommitStrategy` a
 
 | Step | Purpose | Notes |
 | :--- | :--- | :--- |
-| `HandlerExecutionStep` | Runs the user handler inside the pipeline with a timeout. | Required terminal step in every processor. A `TransientError` out of the handler is recorded with `count_as_attempt=False` and rescheduled; a timeout counts. |
+| `HandlerExecutionStep` | Runs the user handler inside the pipeline with a timeout. | Required terminal step in every processor. A `TransientError` out of the handler is recorded with `count_as_attempt=False` and rescheduled; a timeout counts. A counted failure without its own `next_retry_at` is retried after `retry_backoff_base_seconds * 2 ** attempts_made` (equal jitter, capped at `retry_backoff_cap_seconds`). |
 | `PublisherExecutionStep` | The outbox's handler step; installed by `create_outbox_processor`. | Subclasses `HandlerExecutionStep`. The publish timeout is transient too, and the first transient failure ends the batch's publishing — the remaining events are recorded the same way, unpublished, with their schedule untouched. |
 | `SiblingDeduplicationStep` | Skips an `InboxEvent` if a sibling row with the same `(message_id, consumer_group)` is already `completed`. | Calls `InboxEventRepository.has_completed_sibling_for_inbox_key`. A no-op on a non-partitioned table — see [storage adapters](storage_adapters.md#inboxeventrepository). |
 | `MetricsStep` | Pushes batch lifecycle counters into an `InboxMetrics` / `OutboxMetrics` sink. | |
@@ -101,6 +101,8 @@ OutboxPublisher(
     metrics: OutboxMetrics | None = None,
     publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT_SECONDS,
     concurrency_limit: int | None = None,
+    retry_backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
+    retry_backoff_cap_seconds: float = DEFAULT_BACKOFF_CAP_SECONDS,
 )
 ```
 
@@ -142,8 +144,8 @@ Enums:
 
 All three return `EventBatchProcessor[T]`.
 
-- `create_outbox_processor(repo, publisher, *, publish_timeout, metrics=None, dlq_storage=None, enable_otel=False, enable_circuit_breaker=False, ...)`
-- `create_inbox_processor(repo, handler, *, skip_duplicate_siblings=True, filter_sources=None, process_timeout=..., ...)`
+- `create_outbox_processor(repo, publisher, *, publish_timeout, retry_backoff_base_seconds=10.0, retry_backoff_cap_seconds=3600.0, metrics=None, dlq_storage=None, enable_otel=False, enable_circuit_breaker=False, ...)`
+- `create_inbox_processor(repo, handler, *, skip_duplicate_siblings=True, filter_sources=None, process_timeout=..., retry_backoff_base_seconds=10.0, retry_backoff_cap_seconds=3600.0, ...)`
 - `create_dispatching_processor(repo, router, *, dependencies=None, ...)` — uses an `EventRouter`.
 
 ## Dispatch (`omni_box.core.dispatch`)

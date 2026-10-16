@@ -21,11 +21,14 @@ OutboxPublisher(
     metrics=None,
     publish_timeout=DEFAULT_PUBLISH_TIMEOUT_SECONDS,
     concurrency_limit=None,
+    retry_backoff_base_seconds=DEFAULT_BACKOFF_BASE_SECONDS,   # 10.0
+    retry_backoff_cap_seconds=DEFAULT_BACKOFF_CAP_SECONDS,     # 3600.0
 )
 ```
 
 - `publish_timeout` — hard timeout for a single `broker.publish` call. It is treated as the broker's problem, not the row's: it costs no attempt and ends the cycle's publishing. Keep an eye on how it compares with the adapter's own patience — `AIOKafkaProducer(request_timeout_ms=...)` defaults to 40 s against this timeout's 30 s, so with the defaults the step gives up before aiokafka has said anything, and the log shows a publish timeout where a broker error would be more informative. Set `request_timeout_ms` below `publish_timeout`, or raise `publish_timeout` above it.
 - `concurrency_limit` — wraps `publish_batch` in an `asyncio.Semaphore`.
+- `retry_backoff_base_seconds` / `retry_backoff_cap_seconds` — when a counted failure is retried: after `base * 2 ** attempts_made` seconds, capped, with equal jitter. `0` retries on the next cycle. The three `create_*_processor` factories take the same two.
 
 ## `InboxConsumerRunner`
 
