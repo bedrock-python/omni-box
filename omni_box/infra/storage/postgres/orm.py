@@ -1,4 +1,4 @@
-"""Omni-box event ORM models. No dependency on sqlalchemy-postgres-kit."""
+"""Omni-box event ORM models. No dependency on sqlalchemy-foundation-kit."""
 
 from __future__ import annotations
 
