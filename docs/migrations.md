@@ -216,6 +216,16 @@ You can override `__tablename__`, add service-specific columns, or change `__inb
 
 The check constraints are named `ck_<table>_<rule>` — `ck_outbox_events_attempts_valid`, as in the DDL above — unless the `MetaData` of your `DeclarativeBase` carries a `ck` naming convention that interpolates `%(constraint_name)s`. Then the bases hand the convention the bare rule (`attempts_valid`, `completed_status_consistency`, `lock_consistency`) and it builds the name: `sqlalchemy-foundation-kit`'s `"%(table_name)s_%(constraint_name)s_check"` gives `outbox_events_attempts_valid_check`, SQLAlchemy's documented `"ck_%(table_name)s_%(constraint_name)s"` gives `ck_outbox_events_attempts_valid` again. Every name fits PostgreSQL's 63-byte limit either way; the longest, `outbox_events_partitioned_completed_status_consistency_check`, is 60. A finished name handed to such a convention would be qualified a second time, run past 63 bytes and be truncated with a hash. The indexes keep their `idx_<table>_…` names under any convention — SQLAlchemy leaves an explicitly named `Index` alone unless the `ix` rule interpolates `%(constraint_name)s`, which neither of the conventions above does.
 
+A test that checks index names against the convention therefore sees these as foreign.
+alembic-gauntlet's naming test reads `sqlalchemy-foundation-kit`'s convention as "index
+names end in `_idx`" and fails on `idx_outbox_events_…`; allow the prefix on the test
+class:
+
+```python
+class TestMigrations(MigrationTestBase):
+    allowed_index_prefixes: ClassVar[list[str]] = ["idx_"]
+```
+
 If you compose `__table_args__` yourself, pass the metadata so the helper can see the convention:
 
 ```python

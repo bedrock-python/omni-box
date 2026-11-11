@@ -234,7 +234,10 @@ There is no `updated_at` on the entity — that column exists only in the ORM ro
 Constructor keywords, all optional: `max_attempts=6`, `scheduled_at_skew_seconds=60`,
 `scheduled_at_max_future_seconds=31536000`, `payload_max_bytes=1_000_000`,
 `headers_max_count=100`, `header_key_max_length=64`, `header_value_max_length=512`,
-`last_error_max_length=2000`, `truncation_suffix="... [TRUNCATED]"`.
+`last_error_max_length=2000`, `truncation_suffix="... [TRUNCATED]"`. In a Dishka container,
+register it through a factory (`@provide def domain(self) -> OmniBoxDomainService: return
+OmniBoxDomainService()`): `provide(OmniBoxDomainService)` reads those keywords as
+dependencies and fails with `GraphMissingFactoryError` for `int`.
 
 | Method | Signature | Returns |
 |---|---|---|
