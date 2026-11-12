@@ -49,8 +49,8 @@ CREATE TABLE outbox_events (
     locked_at         TIMESTAMPTZ,
     locked_by         VARCHAR(255),
 
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT timezone('UTC', now()),
-    updated_at        TIMESTAMPTZ           DEFAULT timezone('UTC', now()),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ           DEFAULT now(),
 
     CONSTRAINT ck_outbox_events_attempts_valid CHECK (attempts_made <= max_attempts),
     CONSTRAINT ck_outbox_events_completed_status_consistency CHECK (
@@ -124,8 +124,8 @@ CREATE TABLE inbox_events (
     locked_at         TIMESTAMPTZ,
     locked_by         VARCHAR(255),
 
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT timezone('UTC', now()),
-    updated_at        TIMESTAMPTZ           DEFAULT timezone('UTC', now()),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ           DEFAULT now(),
 
     CONSTRAINT ck_inbox_events_attempts_valid CHECK (attempts_made <= max_attempts),
     CONSTRAINT ck_inbox_events_completed_status_consistency CHECK (
@@ -184,6 +184,19 @@ CREATE UNIQUE INDEX idx_outbox_events_p_idempotency_key
 ```
 
 `PostgresOutboxRepository` reads the conflict target from `__outbox_conflict_index_idempotency__` (`("idempotency_key", "created_at")` on the partitioned base). Because that target cannot reject a retry on its own, the repository also serializes inserts by `idempotency_key` with an advisory lock — see [Troubleshooting](troubleshooting.md#outbox).
+
+## Timestamp defaults
+
+`created_at` and `updated_at` default to `now()`, the start of the transaction as a `timestamptz`, the same instant whatever the session `TimeZone`, and every update sets `updated_at` to `now()`. Up to 0.3.1 both were `timezone('UTC', now())`, a `timestamp` without zone that a session in another zone read as its local time, so the values were off by the zone's UTC offset. The repositories pass `created_at` from the entity, so through them it was only `updated_at`, plus `created_at` of rows inserted by other code.
+
+The update value comes from the model and is right once you upgrade. The column defaults stay in a table created on 0.3.1 or earlier until a migration changes them. Write it by hand: autogenerate does not find it even with `compare_server_default=True`, because Alembic compares the two defaults by evaluating them on the server, and in a UTC session they are equal. On a partitioned table, altering the parent changes its partitions too.
+
+```python
+def upgrade() -> None:
+    for table in ("outbox_events", "inbox_events"):
+        for column in ("created_at", "updated_at"):
+            op.alter_column(table, column, server_default=sa.text("now()"))
+```
 
 ## SQLAlchemy registration
 
@@ -283,12 +296,12 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("timezone('UTC', now())"),
+            server_default=sa.text("now()"),
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("timezone('UTC', now())"),
+            server_default=sa.text("now()"),
         ),
         sa.CheckConstraint("attempts_made <= max_attempts", name="ck_outbox_events_attempts_valid"),
         # ...other CHECKs and indexes from get_event_constraints("outbox_events")

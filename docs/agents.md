@@ -394,6 +394,10 @@ Abstract ORM bases — bind them to your own `DeclarativeBase`: `OutboxEventDBBa
 `InboxEventDBBase`, `OutboxEventPartitionedDBBase`, `InboxEventPartitionedDBBase`, the
 mixin `EventMixin`, and the helpers `get_event_constraints(table_name,
 include_created_at_in_unique=False, *, metadata=None)` and `UnConstrainedEnum`.
+`created_at` and `updated_at` default to `now()` on the server, and every update sets
+`updated_at` to `now()`. Up to 0.3.1 the default was `timezone('UTC', now())`, which a session
+not on UTC shifted by its offset; a table created then keeps it until a hand-written migration
+changes it ([Migrations & DDL](migrations.md#timestamp-defaults)).
 
 `PostgresOutboxRepository(session, *, model_class, conflict_index_id=None,
 conflict_index_idempotency=None, batch_size=1000, error_max_length=2000,
