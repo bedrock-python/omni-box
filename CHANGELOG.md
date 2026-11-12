@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.3.1...omni-box-v0.3.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **postgres:** default created_at and updated_at to now() so a non-UTC session does not shift them ([#79](https://github.com/bedrock-python/omni-box/issues/79)) ([54332ba](https://github.com/bedrock-python/omni-box/commit/54332baaf1fc9fb021f276705753f49aa2d173c0))
+
 ## [0.3.1](https://github.com/bedrock-python/omni-box/compare/omni-box-v0.3.0...omni-box-v0.3.1) (2026-10-16)
 
 
